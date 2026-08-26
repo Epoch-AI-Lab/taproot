@@ -1,0 +1,21 @@
+[package]
+name = "taproot"
+version = "0.1.0"
+edition = "2021"
+description = "State inheritance fabric between VCS and CI — environment-as-object"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.0"
