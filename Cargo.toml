@@ -1,6 +1,6 @@
 [package]
 name = "taproot"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "State inheritance fabric between VCS and CI — environment-as-object"
 license = "MIT"
@@ -21,6 +21,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fuser = "0.14"
 libc = "0.2"
+tempfile = "3.0"
 
 [dev-dependencies]
 tempfile = "3.0"

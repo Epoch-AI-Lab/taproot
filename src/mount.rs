@@ -244,6 +244,7 @@ impl TaprootFS {
     }
 
     #[cfg(test)]
+    #[allow(private_interfaces)]
     pub fn get_inode(&self, ino: u64) -> Option<&Inode> {
         self.inodes.get(&ino)
     }

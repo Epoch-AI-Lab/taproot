@@ -16,6 +16,17 @@ fn resolve_state_path(input: Option<PathBuf>) -> PathBuf {
     input.unwrap_or_else(default_state_path)
 }
 
+fn display_state_path(path: &Path) -> String {
+    // Show absolute if relative, to avoid cwd confusion noted in PR review
+    if path.is_absolute() {
+        path.display().to_string()
+    } else if let Ok(cur) = std::env::current_dir() {
+        cur.join(path).display().to_string()
+    } else {
+        path.display().to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
@@ -45,11 +56,11 @@ pub enum Commands {
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Repository name (e.g. myapp)
+    /// Repository name (e.g. myapp or org/myapp)
     #[arg(long)]
     pub repo: String,
 
-    /// Branch name (e.g. main)
+    /// Branch name (e.g. main or feat/foo)
     #[arg(long)]
     pub branch: String,
 
@@ -57,7 +68,7 @@ pub struct InitArgs {
     #[arg(long)]
     pub commit: String,
 
-    /// Path to state file (default: .taproot/state.json)
+    /// Path to state file (default: .taproot/state.json, relative to current directory)
     #[arg(long, value_name = "PATH")]
     pub state_path: Option<PathBuf>,
 
@@ -68,10 +79,10 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct MountArgs {
-    /// Path to mount (materialisation target)
+    /// Path to mount (must be an existing empty directory)
     pub path: PathBuf,
 
-    /// Path to state file (default: .taproot/state.json)
+    /// Path to state file (default: .taproot/state.json, relative to current directory)
     #[arg(long, value_name = "PATH")]
     pub state_path: Option<PathBuf>,
 
@@ -82,14 +93,14 @@ pub struct MountArgs {
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {
-    /// Path to state file (default: .taproot/state.json)
+    /// Path to state file (default: .taproot/state.json, relative to current directory)
     #[arg(long, value_name = "PATH")]
     pub state_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct VerifyArgs {
-    /// Path to state file (default: .taproot/state.json)
+    /// Path to state file (default: .taproot/state.json, relative to current directory)
     #[arg(long, value_name = "PATH")]
     pub state_path: Option<PathBuf>,
 }
@@ -150,10 +161,43 @@ fn validate_non_empty(field: &str, value: &str) -> Result<(), TaprootError> {
             "{field} too long (max 256)"
         )));
     }
-    if value.contains('/') || value.contains('\0') {
+    if value.contains('\0') || value.contains('\\') {
         return Err(TaprootError::InvalidKey(format!(
-            "{field} must not contain '/' or null byte"
+            "{field} must not contain null byte or backslash"
         )));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(TaprootError::InvalidKey(format!(
+            "{field} must not contain newline"
+        )));
+    }
+    // Allow '/' for org/repo and branch names like feat/foo, but block traversal and empty segments
+    if value == "." || value == ".." {
+        return Err(TaprootError::InvalidKey(format!(
+            "{field} must not be '.' or '..'"
+        )));
+    }
+    if value.starts_with('/') || value.ends_with('/') {
+        return Err(TaprootError::InvalidKey(format!(
+            "{field} must not start or end with '/'"
+        )));
+    }
+    if value.contains("//") {
+        return Err(TaprootError::InvalidKey(format!(
+            "{field} must not contain '//'"
+        )));
+    }
+    for seg in value.split('/') {
+        if seg == "." || seg == ".." {
+            return Err(TaprootError::InvalidKey(format!(
+                "{field} segment must not be '.' or '..'"
+            )));
+        }
+        if seg.is_empty() && value.contains('/') {
+            return Err(TaprootError::InvalidKey(format!(
+                "{field} contains empty segment"
+            )));
+        }
     }
     Ok(())
 }
@@ -218,7 +262,7 @@ pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
         let preview = if pk.len() >= 16 { &pk[..16] } else { pk };
         println!("pubkey:     {preview}...");
     }
-    println!("path:       {}", state_path.display());
+    println!("path:       {}", display_state_path(&state_path));
     println!();
     print_status_line(true);
     println!();
@@ -236,13 +280,13 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
         Err(e) => {
             eprintln!(
                 "warning: failed to load state from {}: {e}",
-                state_path.display()
+                display_state_path(&state_path)
             );
             if !Path::new(&state_path).exists() {
                 eprintln!("hint: run `taproot init --repo <repo> --branch <branch> --commit <commit>` first");
             }
             println!();
-            print_status_line(false);
+            println!("status:     ✗ ERROR — state not found or invalid");
             println!();
             return Err(e);
         }
@@ -251,7 +295,8 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
     print_mount_header(&signed);
     println!();
     println!("mount:      {}", args.path.display());
-    match std::fs::symlink_metadata(&args.path) {
+    let target_meta = std::fs::symlink_metadata(&args.path);
+    match &target_meta {
         Ok(m) if m.is_dir() => println!("target:     exists (directory)"),
         Ok(m) if m.file_type().is_symlink() => {
             println!("target:     exists (symlink — will be rejected)")
@@ -264,14 +309,45 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
         print_unsigned_warning();
     }
     println!();
-    // Only print INHERITED after mount succeeds, otherwise misleading
-    if args.no_fuse {
-        print_status_line(true);
+
+    // Validate mountpoint before honoring --no-fuse — CI must not hide symlink/file attacks
+    if let Ok(m) = &target_meta {
+        if m.file_type().is_symlink() {
+            let e = TaprootError::Mount(format!(
+                "mountpoint is a symlink (refusing): {}",
+                args.path.display()
+            ));
+            eprintln!("✗ mount failed: {e}");
+            println!("status:     ✗ MOUNT FAILED — symlink rejected");
+            println!();
+            return Err(e);
+        }
+        if !m.is_dir() {
+            let e = TaprootError::Mount(format!(
+                "mountpoint is not a directory: {}",
+                args.path.display()
+            ));
+            eprintln!("✗ mount failed: {e}");
+            println!("status:     ✗ MOUNT FAILED — not a directory");
+            println!();
+            return Err(e);
+        }
+    } else if !args.no_fuse {
+        // real mount requires existing dir
+        let e = TaprootError::Mount(format!(
+            "mountpoint does not exist: {}",
+            args.path.display()
+        ));
+        eprintln!("✗ mount failed: {e}");
+        println!("status:     ✗ MOUNT FAILED — mountpoint missing");
         println!();
+        return Err(e);
     }
 
     if args.no_fuse {
-        println!("(no-fuse — skipping FUSE mount)");
+        println!("(no-fuse — skipping FUSE mount, mountpoint validated)");
+        print_status_line(true);
+        println!();
         return Ok(());
     }
 
@@ -287,7 +363,7 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
         }
         Err(e) => {
             eprintln!("✗ mount failed: {e}");
-            print_status_line(false);
+            println!("status:     ✗ MOUNT FAILED — {}", e);
             println!();
             Err(e)
         }
@@ -331,7 +407,7 @@ pub fn handle_status(args: StatusArgs) -> Result<(), TaprootError> {
     if signed.signature.is_none() {
         print_unsigned_warning();
     }
-    println!("path:       {}", state_path.display());
+    println!("path:       {}", display_state_path(&state_path));
     println!();
     print_status_line(true);
     println!();
@@ -351,7 +427,7 @@ pub fn handle_verify(args: VerifyArgs) -> Result<(), TaprootError> {
                     "  repo: {}  base: {}@{}",
                     signed.state.base.repo, signed.state.base.branch, signed.state.base.commit
                 );
-                println!("  path: {}", state_path.display());
+                println!("  path: {}", display_state_path(&state_path));
                 print_unsigned_warning();
             } else {
                 println!("✓ verified — sha256:{}", signed.hash);
@@ -359,12 +435,15 @@ pub fn handle_verify(args: VerifyArgs) -> Result<(), TaprootError> {
                     "  repo: {}  base: {}@{}",
                     signed.state.base.repo, signed.state.base.branch, signed.state.base.commit
                 );
-                println!("  path: {}", state_path.display());
+                println!("  path: {}", display_state_path(&state_path));
             }
             Ok(())
         }
         Err(e) => {
-            eprintln!("✗ verification failed for {}: {e}", state_path.display());
+            eprintln!(
+                "✗ verification failed for {}: {e}",
+                display_state_path(&state_path)
+            );
             Err(e)
         }
     }

@@ -43,7 +43,7 @@ If the state has drifted from the signed baseline, Taproot blocks execution and 
 
 We are building the wedge primitive:
 - [x] State serialization engine (Rust)
-- [ ] FUSE mount CLI
+- [x] FUSE mount CLI (read-only, v0.0.1)
 - [ ] GitHub Action + baseline check
 - [ ] Signed state registry
 - [ ] Managed fabric + registry API
@@ -58,7 +58,10 @@ Taproot's mount CLI, protocol format, and state schema are MIT-licensed. The man
 git clone https://github.com/Epoch-AI-Lab/taproot.git
 cd taproot
 cargo build --release
-./target/release/taproot mount ~/projects/myapp
+./target/release/taproot init --repo myapp --branch main --commit 9f3a2c1
+./target/release/taproot mount --no-fuse ~/projects/myapp   # requires existing dir; omit --no-fuse for real FUSE
+./target/release/taproot status
+./target/release/taproot verify
 ```
 
 ## Contribute
