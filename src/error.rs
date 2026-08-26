@@ -16,4 +16,7 @@ pub enum TaprootError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("mount failed: {0}")]
+    Mount(String),
 }

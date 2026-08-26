@@ -1,34 +1,25 @@
-use taproot::{StateEngine, TaprootState};
+use clap::Parser;
+use taproot::cli::{handle_init, handle_mount, handle_status, handle_verify, Cli, Commands};
 
 fn main() {
-    // Minimal demo — will become `taproot mount` CLI in next step.
-    let state = TaprootState::new("myapp", "main", "9f3a2c1")
-        .with_runtime("python", "3.11.4")
-        .with_runtime("node", "20.5.0")
-        .with_container("postgres", "15.3", "postgres:15.3")
-        .with_env("DATABASE_URL", "postgres://localhost/myapp");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
-    let hash = StateEngine::hash(&state).expect("hash");
-    let (priv_key, pub_key) = StateEngine::generate_keypair();
-    let signed = StateEngine::sign(&state, &priv_key).expect("sign");
+    let cli = Cli::parse();
 
-    println!("TAPROOT STATE");
-    println!("─────────────────────────────────────────");
-    println!("repo:       {}", state.base.repo);
-    println!("base:       {}@{}", state.base.branch, state.base.commit);
-    println!("state:      signed · sha256:{}", &hash[..12]);
-    println!("runtimes:   {}", state.runtimes.len());
-    for r in &state.runtimes {
-        println!("  - {}: {} (pinned={})", r.name, r.version, r.pinned);
+    let result = match cli.command {
+        Commands::Init(args) => handle_init(args),
+        Commands::Mount(args) => handle_mount(args),
+        Commands::Status(args) => handle_status(args),
+        Commands::Verify(args) => handle_verify(args),
+    };
+
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
-    println!("containers: {}", state.containers.len());
-    println!("env-vars:   {}", state.env_vars.len());
-    println!();
-    println!("hash:       {}", signed.hash);
-    println!("pubkey:     {}...", &pub_key[..16]);
-    println!("verified:   {}", StateEngine::verify(&signed).is_ok());
-    println!();
-    println!("status:     ▶ INHERITED — ready to work");
-    println!();
-    println!("[next: cargo run -- mount ~/projects/myapp]");
 }

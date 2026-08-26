@@ -50,7 +50,8 @@ impl StateEngine {
     /// Sign state. Returns SignedState with hash + signature.
     pub fn sign(state: &TaprootState, private_key_b64: &str) -> Result<SignedState, TaprootError> {
         let hash_hex = Self::hash(state)?;
-        let hash_bytes = hex::decode(&hash_hex).expect("hex from sha256 is valid");
+        let hash_bytes = hex::decode(&hash_hex)
+            .map_err(|e| TaprootError::InvalidKey(format!("hash not hex: {e}")))?;
 
         let key_bytes = B64
             .decode(private_key_b64.trim())
@@ -101,7 +102,8 @@ impl StateEngine {
                     .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
                 let signature = Signature::from_bytes(&sig_arr);
 
-                let hash_bytes = hex::decode(&signed.hash).expect("hash hex valid");
+                let hash_bytes = hex::decode(&signed.hash)
+                    .map_err(|e| TaprootError::InvalidKey(format!("hash not hex: {e}")))?;
                 verifying_key
                     .verify(&hash_bytes, &signature)
                     .map_err(|_| TaprootError::InvalidSignature)
@@ -113,10 +115,16 @@ impl StateEngine {
         }
     }
 
-    /// Save signed state to file (pretty JSON)
+    /// Save signed state to file (pretty JSON) — atomic via tmp + rename
     pub fn save(path: &std::path::Path, signed: &SignedState) -> Result<(), TaprootError> {
         let bytes = serde_json::to_vec_pretty(signed)?;
-        std::fs::write(path, bytes)?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes)?;
+        // best-effort fsync before rename
+        if let Ok(f) = std::fs::File::open(&tmp) {
+            let _ = f.sync_all();
+        }
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
