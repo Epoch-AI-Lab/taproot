@@ -578,7 +578,10 @@ pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
         let (priv_key, key_info) = if keys_path.exists() {
             match crate::keys::KeyStore::init(&keys_path).and_then(|ks| {
                 let kp = ks.default_key()?;
-                Ok((kp.private_key.clone(), format!("key {} ({})", kp.id, &kp.public_key[..16])))
+                Ok((
+                    kp.private_key.clone(),
+                    format!("key {} ({})", kp.id, &kp.public_key[..16]),
+                ))
             }) {
                 Ok((k, info)) => (k, Some(info)),
                 Err(_) => (StateEngine::generate_keypair().0, None),
@@ -850,7 +853,12 @@ pub fn handle_keys_list(args: KeysListArgs) -> Result<(), TaprootError> {
     } else {
         for k in &list {
             let active = if k.active { "active" } else { "inactive" };
-            println!("  {}  {}  {active}  {}", k.id, &k.public_key[..16], k.created_at);
+            println!(
+                "  {}  {}  {active}  {}",
+                k.id,
+                &k.public_key[..16],
+                k.created_at
+            );
         }
     }
     Ok(())
@@ -897,7 +905,15 @@ pub fn handle_fabric_audit(args: FabricAuditArgs) -> Result<(), TaprootError> {
         println!("(no audit entries)");
     } else {
         for e in &entries {
-            println!("{}  {}  {}/{}  {}  signed={}", e.ts, e.action, e.repo, e.branch, &e.hash[..12], e.signed);
+            println!(
+                "{}  {}  {}/{}  {}  signed={}",
+                e.ts,
+                e.action,
+                e.repo,
+                e.branch,
+                &e.hash[..12],
+                e.signed
+            );
         }
         println!();
         println!("{} entries", entries.len());
@@ -973,7 +989,10 @@ pub fn handle_serve(args: ServeArgs) -> Result<(), TaprootError> {
     println!("fabric:     {}", display_state_path(&fabric_path));
     println!("addr:       {}", args.addr);
     println!();
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| TaprootError::Io(std::io::Error::other(e.to_string())))?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| TaprootError::Io(std::io::Error::other(e.to_string())))?;
     rt.block_on(crate::server::serve(registry_path, fabric_path, args.addr))?;
     Ok(())
 }
@@ -987,8 +1006,6 @@ pub fn handle_remote(args: RemoteArgs) -> Result<(), TaprootError> {
     }
 }
 
-
-
 pub fn handle_remote_push(args: RemotePushArgs) -> Result<(), TaprootError> {
     let state_path = resolve_state_path(args.state_path);
     let bytes = std::fs::read(&state_path)?;
@@ -1000,33 +1017,53 @@ pub fn handle_remote_push(args: RemotePushArgs) -> Result<(), TaprootError> {
     if let Some(tok) = args.token {
         builder = builder.header("Authorization", format!("Bearer {tok}"));
     }
-    let resp = builder.send().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let resp = builder
+        .send()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     if !resp.status().is_success() {
         let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!("remote push failed: {txt}")));
+        return Err(TaprootError::InvalidKey(format!(
+            "remote push failed: {txt}"
+        )));
     }
-    let v: serde_json::Value = resp.json().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let v: serde_json::Value = resp
+        .json()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     println!("✓ remote push ok — {}", v);
     Ok(())
 }
 
 pub fn handle_remote_pull(args: RemotePullArgs) -> Result<(), TaprootError> {
-    let url = format!("{}/v1/states/{}", args.remote.trim_end_matches('/'), args.hash);
+    let url = format!(
+        "{}/v1/states/{}",
+        args.remote.trim_end_matches('/'),
+        args.hash
+    );
     let client = reqwest::blocking::Client::new();
     let mut req = client.get(&url);
     if let Some(tok) = args.token {
         req = req.header("Authorization", format!("Bearer {tok}"));
     }
-    let resp = req.send().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let resp = req
+        .send()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     if !resp.status().is_success() {
         let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!("remote pull failed: {txt}")));
+        return Err(TaprootError::InvalidKey(format!(
+            "remote pull failed: {txt}"
+        )));
     }
-    let signed: crate::state::SignedState = resp.json().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let signed: crate::state::SignedState = resp
+        .json()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     crate::engine::StateEngine::verify(&signed)?;
     if let Some(out) = args.out {
         crate::engine::StateEngine::save(&out, &signed)?;
-        println!("✓ remote pull {} -> {}", signed.hash, display_state_path(&out));
+        println!(
+            "✓ remote pull {} -> {}",
+            signed.hash,
+            display_state_path(&out)
+        );
     } else {
         println!("{}", serde_json::to_string_pretty(&signed).unwrap());
     }
@@ -1036,18 +1073,29 @@ pub fn handle_remote_pull(args: RemotePullArgs) -> Result<(), TaprootError> {
 pub fn handle_remote_resolve(args: RemoteResolveArgs) -> Result<(), TaprootError> {
     let repo = crate::registry::sanitize(&args.repo);
     let branch = crate::registry::sanitize(&args.branch);
-    let url = format!("{}/v1/refs/{}/{}", args.remote.trim_end_matches('/'), repo, branch);
+    let url = format!(
+        "{}/v1/refs/{}/{}",
+        args.remote.trim_end_matches('/'),
+        repo,
+        branch
+    );
     let client = reqwest::blocking::Client::new();
     let mut req = client.get(&url);
     if let Some(tok) = args.token {
         req = req.header("Authorization", format!("Bearer {tok}"));
     }
-    let resp = req.send().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let resp = req
+        .send()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     if !resp.status().is_success() {
         let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!("remote resolve failed: {txt}")));
+        return Err(TaprootError::InvalidKey(format!(
+            "remote resolve failed: {txt}"
+        )));
     }
-    let v: serde_json::Value = resp.json().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let v: serde_json::Value = resp
+        .json()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     println!("{}", v["hash"].as_str().unwrap_or(""));
     Ok(())
 }
@@ -1056,12 +1104,20 @@ pub fn handle_remote_check(args: RemoteCheckArgs) -> Result<(), TaprootError> {
     let url = format!("{}/v1/check", args.remote.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let body = serde_json::json!({"baseline_hash": args.baseline_hash, "current_hash": args.current_hash, "strict": args.strict});
-    let resp = client.post(&url).json(&body).send().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     if !resp.status().is_success() {
         let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!("remote check failed: {txt}")));
+        return Err(TaprootError::InvalidKey(format!(
+            "remote check failed: {txt}"
+        )));
     }
-    let v: serde_json::Value = resp.json().map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+    let v: serde_json::Value = resp
+        .json()
+        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
     } else {
@@ -1073,7 +1129,10 @@ pub fn handle_remote_check(args: RemoteCheckArgs) -> Result<(), TaprootError> {
         }
     }
     if v["has_breaking"].as_bool().unwrap_or(false) {
-        return Err(TaprootError::Drift { breaking: 1, warning: 0 });
+        return Err(TaprootError::Drift {
+            breaking: 1,
+            warning: 0,
+        });
     }
     Ok(())
 }
@@ -1093,7 +1152,10 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     })?;
     let baseline = StateEngine::load(&baseline_path).map_err(|e| {
         if !baseline_path.exists() {
-            eprintln!("hint: baseline not found at {}", display_state_path(&baseline_path));
+            eprintln!(
+                "hint: baseline not found at {}",
+                display_state_path(&baseline_path)
+            );
             return TaprootError::BaselineMissing(display_state_path(&baseline_path));
         }
         eprintln!("✗ check failed — baseline invalid: {e}");
@@ -1104,7 +1166,8 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     // Both must be signed; otherwise treat as breaking drift
     let mut unsigned_warnings = Vec::new();
     if current.signature.is_none() {
-        unsigned_warnings.push("current state is unsigned — not cryptographically signed".to_string());
+        unsigned_warnings
+            .push("current state is unsigned — not cryptographically signed".to_string());
     }
     if baseline.signature.is_none() {
         unsigned_warnings.push("baseline is unsigned — not cryptographically signed".to_string());
@@ -1115,8 +1178,14 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     let diffs = diff_states(&baseline.state, &current.state, effective_strict);
 
     // Count breaking vs warning
-    let breaking = diffs.iter().filter(|d| d.severity == Severity::Breaking).count();
-    let warnings = diffs.iter().filter(|d| d.severity == Severity::Warning).count();
+    let breaking = diffs
+        .iter()
+        .filter(|d| d.severity == Severity::Breaking)
+        .count();
+    let warnings = diffs
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .count();
 
     let has_unsigned_breaking = !unsigned_warnings.is_empty();
     let is_breaking_drift = breaking > 0 || has_unsigned_breaking;
@@ -1135,7 +1204,8 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
             signed: current.signature.is_some(),
         },
         drifted: is_any_drift,
-        has_breaking: is_breaking_drift || (effective_strict && warnings > 0 && !args.allow_warnings),
+        has_breaking: is_breaking_drift
+            || (effective_strict && warnings > 0 && !args.allow_warnings),
         diffs: diffs.clone(),
         warnings: unsigned_warnings.clone(),
     };
@@ -1145,16 +1215,42 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     } else {
         println!("TAPROOT CHECK");
         println!("─────────────────────────────────────────");
-        let b_short = if baseline.hash.len() >= 12 { &baseline.hash[..12] } else { &baseline.hash };
-        let c_short = if current.hash.len() >= 12 { &current.hash[..12] } else { &current.hash };
-        let b_sig = if baseline.signature.is_some() { "signed" } else { "unsigned" };
-        let c_sig = if current.signature.is_some() { "signed" } else { "unsigned" };
-        println!("baseline:   {} ({b_sig} · sha256:{b_short})", display_state_path(&baseline_path));
-        println!("current:    {} ({c_sig} · sha256:{c_short})", display_state_path(&state_path));
+        let b_short = if baseline.hash.len() >= 12 {
+            &baseline.hash[..12]
+        } else {
+            &baseline.hash
+        };
+        let c_short = if current.hash.len() >= 12 {
+            &current.hash[..12]
+        } else {
+            &current.hash
+        };
+        let b_sig = if baseline.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        let c_sig = if current.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        println!(
+            "baseline:   {} ({b_sig} · sha256:{b_short})",
+            display_state_path(&baseline_path)
+        );
+        println!(
+            "current:    {} ({c_sig} · sha256:{c_short})",
+            display_state_path(&state_path)
+        );
         println!(
             "base:       {} {}@{} -> {} {}@{}",
-            baseline.state.base.repo, baseline.state.base.branch, baseline.state.base.commit,
-            current.state.base.repo, current.state.base.branch, current.state.base.commit,
+            baseline.state.base.repo,
+            baseline.state.base.branch,
+            baseline.state.base.commit,
+            current.state.base.repo,
+            current.state.base.branch,
+            current.state.base.commit,
         );
         println!();
         if diffs.is_empty() && unsigned_warnings.is_empty() {
@@ -1162,15 +1258,26 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
             println!();
             println!("status:     ▶ INHERITED — no drift");
         } else {
-            println!("drift:      {breaking} breaking, {warnings} warning{}", if warnings == 1 { "" } else { "s" });
+            println!(
+                "drift:      {breaking} breaking, {warnings} warning{}",
+                if warnings == 1 { "" } else { "s" }
+            );
             if !unsigned_warnings.is_empty() {
                 for w in &unsigned_warnings {
                     println!("  ✗ {w} (breaking)");
                 }
             }
             for d in &diffs {
-                let icon = if d.severity == Severity::Breaking { "✗" } else { "⚠" };
-                let sev = if d.severity == Severity::Breaking { "breaking" } else { "warning" };
+                let icon = if d.severity == Severity::Breaking {
+                    "✗"
+                } else {
+                    "⚠"
+                };
+                let sev = if d.severity == Severity::Breaking {
+                    "breaking"
+                } else {
+                    "warning"
+                };
                 match d.kind {
                     crate::diff::DiffKind::Changed => {
                         let exp = d.expected.as_deref().unwrap_or("null");
@@ -1189,7 +1296,10 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
             }
             println!();
             if is_breaking_drift || (effective_strict && warnings > 0) {
-                println!("status:     ✗ DRIFTED — {} breaking", breaking + unsigned_warnings.len());
+                println!(
+                    "status:     ✗ DRIFTED — {} breaking",
+                    breaking + unsigned_warnings.len()
+                );
             } else {
                 println!("status:     ⚠ DRIFTED — warnings only (pass with --allow-warnings or --no-strict)");
             }
@@ -1203,13 +1313,22 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     // - warnings + strict => fail, warnings + allow_warnings => pass
     let unsigned_breaking = unsigned_warnings.len();
     if has_unsigned_breaking {
-        return Err(TaprootError::Drift { breaking: breaking + unsigned_breaking, warning: warnings });
+        return Err(TaprootError::Drift {
+            breaking: breaking + unsigned_breaking,
+            warning: warnings,
+        });
     }
     if breaking > 0 {
-        return Err(TaprootError::Drift { breaking, warning: warnings });
+        return Err(TaprootError::Drift {
+            breaking,
+            warning: warnings,
+        });
     }
     if warnings > 0 && effective_strict && !args.allow_warnings {
-        return Err(TaprootError::Drift { breaking, warning: warnings });
+        return Err(TaprootError::Drift {
+            breaking,
+            warning: warnings,
+        });
     }
     // Validate has_breaking helper stays consistent
     debug_assert_eq!(has_breaking(&diffs), breaking > 0);
@@ -1249,10 +1368,17 @@ pub fn handle_registry_push(args: RegistryPushArgs) -> Result<(), TaprootError> 
     let fabric_path = resolve_fabric_path(None);
     if fabric_path.exists() {
         if let Ok(fabric) = crate::fabric::Fabric::init(&fabric_path, &registry_path) {
-            let policy = fabric.get_policy(&signed.state.base.repo).unwrap_or_default();
+            let policy = fabric
+                .get_policy(&signed.state.base.repo)
+                .unwrap_or_default();
             if policy.require_signed && signed.signature.is_none() {
-                eprintln!("✗ policy blocks unsigned push for repo {} (require_signed=true)", signed.state.base.repo);
-                return Err(TaprootError::InvalidKey("policy requires signed state".into()));
+                eprintln!(
+                    "✗ policy blocks unsigned push for repo {} (require_signed=true)",
+                    signed.state.base.repo
+                );
+                return Err(TaprootError::InvalidKey(
+                    "policy requires signed state".into(),
+                ));
             }
         }
     }
@@ -1277,14 +1403,21 @@ pub fn handle_registry_push(args: RegistryPushArgs) -> Result<(), TaprootError> 
     }
 
     let short = if hash.len() >= 12 { &hash[..12] } else { &hash };
-    let sig_label = if signed.signature.is_some() { "signed" } else { "unsigned" };
+    let sig_label = if signed.signature.is_some() {
+        "signed"
+    } else {
+        "unsigned"
+    };
     println!("TAPROOT REGISTRY PUSH");
     println!("─────────────────────────────────────────");
     println!("repo:       {}", signed.state.base.repo);
     println!("branch:     {}", signed.state.base.branch);
     println!("hash:       {hash} (sha256:{short}, {sig_label})");
     println!("registry:   {}", display_state_path(&registry_path));
-    println!("object:     {}/objects/{hash}.json", display_state_path(&registry_path));
+    println!(
+        "object:     {}/objects/{hash}.json",
+        display_state_path(&registry_path)
+    );
     println!(
         "ref:        {}/refs/{}/{}",
         display_state_path(&registry_path),
@@ -1307,13 +1440,24 @@ pub fn handle_registry_pull(args: RegistryPullArgs) -> Result<(), TaprootError> 
         StateEngine::save(&out, &signed)?;
         println!("✓ pulled {} -> {}", signed.hash, display_state_path(&out));
     } else {
-        let short = if signed.hash.len() >= 12 { &signed.hash[..12] } else { &signed.hash };
-        let sig_label = if signed.signature.is_some() { "signed" } else { "unsigned" };
+        let short = if signed.hash.len() >= 12 {
+            &signed.hash[..12]
+        } else {
+            &signed.hash
+        };
+        let sig_label = if signed.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
         println!("TAPROOT REGISTRY PULL");
         println!("─────────────────────────────────────────");
         println!("hash:       {} ({sig_label} · sha256:{short})", signed.hash);
         println!("repo:       {}", signed.state.base.repo);
-        println!("base:       {}@{}", signed.state.base.branch, signed.state.base.commit);
+        println!(
+            "base:       {}@{}",
+            signed.state.base.branch, signed.state.base.commit
+        );
         println!("registry:   {}", display_state_path(&registry_path));
         println!("runtimes:   {}", signed.state.runtimes.len());
         println!("containers: {}", signed.state.containers.len());
@@ -1323,7 +1467,10 @@ pub fn handle_registry_pull(args: RegistryPullArgs) -> Result<(), TaprootError> 
         }
         println!();
         // Also print state path hint
-        println!("[tip: taproot registry pull {} --out .taproot/state.json]", signed.hash);
+        println!(
+            "[tip: taproot registry pull {} --out .taproot/state.json]",
+            signed.hash
+        );
     }
     Ok(())
 }
@@ -1407,8 +1554,16 @@ pub fn handle_registry_log(args: RegistryLogArgs) -> Result<(), TaprootError> {
         println!("(no entries for {}/{})", args.repo, args.branch);
     } else {
         for signed in &entries {
-            let short = if signed.hash.len() >= 12 { &signed.hash[..12] } else { &signed.hash };
-            let sig_label = if signed.signature.is_some() { "signed" } else { "unsigned" };
+            let short = if signed.hash.len() >= 12 {
+                &signed.hash[..12]
+            } else {
+                &signed.hash
+            };
+            let sig_label = if signed.signature.is_some() {
+                "signed"
+            } else {
+                "unsigned"
+            };
             println!(
                 "* {}  {}@{}  {sig_label} · sha256:{short}",
                 signed.hash, signed.state.base.branch, signed.state.base.commit

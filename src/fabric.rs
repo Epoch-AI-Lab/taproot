@@ -230,7 +230,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fab = Fabric::init(&dir.path().join("fabric"), &dir.path().join("registry")).unwrap();
         fab.add_token("secret-token-123", "alice").unwrap();
-        assert_eq!(fab.verify_token("secret-token-123").unwrap(), Some("alice".into()));
+        assert_eq!(
+            fab.verify_token("secret-token-123").unwrap(),
+            Some("alice".into())
+        );
         assert_eq!(fab.verify_token("bad").unwrap(), None);
     }
 

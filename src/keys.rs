@@ -64,12 +64,18 @@ impl KeyStore {
             return Err(TaprootError::InvalidKey("invalid key id".into()));
         }
         if self.key_path(&id).exists() {
-            return Err(TaprootError::InvalidKey(format!("key id already exists: {id}")));
+            return Err(TaprootError::InvalidKey(format!(
+                "key id already exists: {id}"
+            )));
         }
         // verify base64 decodes to 32 bytes
-        let priv_bytes = B64.decode(&priv_b64).map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
+        let priv_bytes = B64
+            .decode(&priv_b64)
+            .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
         if priv_bytes.len() != 32 {
-            return Err(TaprootError::InvalidKey("private key must be 32 bytes".into()));
+            return Err(TaprootError::InvalidKey(
+                "private key must be 32 bytes".into(),
+            ));
         }
 
         let kp = Keypair {

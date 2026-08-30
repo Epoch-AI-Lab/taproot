@@ -48,7 +48,11 @@ pub struct EndpointInfo {
     pub signed: bool,
 }
 
-pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool) -> Vec<FieldDiff> {
+pub fn diff_states(
+    baseline: &TaprootState,
+    current: &TaprootState,
+    strict: bool,
+) -> Vec<FieldDiff> {
     let mut diffs = Vec::new();
 
     // version — always breaking
@@ -78,7 +82,11 @@ pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool
             kind: DiffKind::Changed,
             expected: Some(baseline.base.branch.clone()),
             actual: Some(current.base.branch.clone()),
-            severity: if strict { Severity::Breaking } else { Severity::Warning },
+            severity: if strict {
+                Severity::Breaking
+            } else {
+                Severity::Warning
+            },
         });
     }
     if baseline.base.commit != current.base.commit {
@@ -87,16 +95,30 @@ pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool
             kind: DiffKind::Changed,
             expected: Some(baseline.base.commit.clone()),
             actual: Some(current.base.commit.clone()),
-            severity: if strict { Severity::Breaking } else { Severity::Warning },
+            severity: if strict {
+                Severity::Breaking
+            } else {
+                Severity::Warning
+            },
         });
     }
 
     // runtimes — keyed by name
-    let base_rts: BTreeMap<&str, &crate::state::Runtime> =
-        baseline.runtimes.iter().map(|r| (r.name.as_str(), r)).collect();
-    let cur_rts: BTreeMap<&str, &crate::state::Runtime> =
-        current.runtimes.iter().map(|r| (r.name.as_str(), r)).collect();
-    let all_rt_names: BTreeSet<&str> = base_rts.keys().copied().chain(cur_rts.keys().copied()).collect();
+    let base_rts: BTreeMap<&str, &crate::state::Runtime> = baseline
+        .runtimes
+        .iter()
+        .map(|r| (r.name.as_str(), r))
+        .collect();
+    let cur_rts: BTreeMap<&str, &crate::state::Runtime> = current
+        .runtimes
+        .iter()
+        .map(|r| (r.name.as_str(), r))
+        .collect();
+    let all_rt_names: BTreeSet<&str> = base_rts
+        .keys()
+        .copied()
+        .chain(cur_rts.keys().copied())
+        .collect();
     for name in all_rt_names {
         match (base_rts.get(name), cur_rts.get(name)) {
             (Some(b), Some(c)) => {
@@ -115,7 +137,11 @@ pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool
                         kind: DiffKind::Changed,
                         expected: Some(b.pinned.to_string()),
                         actual: Some(c.pinned.to_string()),
-                        severity: if strict { Severity::Breaking } else { Severity::Warning },
+                        severity: if strict {
+                            Severity::Breaking
+                        } else {
+                            Severity::Warning
+                        },
                     });
                 }
             }
@@ -138,11 +164,21 @@ pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool
     }
 
     // containers — keyed by name
-    let base_ct: BTreeMap<&str, &crate::state::Container> =
-        baseline.containers.iter().map(|c| (c.name.as_str(), c)).collect();
-    let cur_ct: BTreeMap<&str, &crate::state::Container> =
-        current.containers.iter().map(|c| (c.name.as_str(), c)).collect();
-    let all_ct_names: BTreeSet<&str> = base_ct.keys().copied().chain(cur_ct.keys().copied()).collect();
+    let base_ct: BTreeMap<&str, &crate::state::Container> = baseline
+        .containers
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+    let cur_ct: BTreeMap<&str, &crate::state::Container> = current
+        .containers
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+    let all_ct_names: BTreeSet<&str> = base_ct
+        .keys()
+        .copied()
+        .chain(cur_ct.keys().copied())
+        .collect();
     for name in all_ct_names {
         match (base_ct.get(name), cur_ct.get(name)) {
             (Some(b), Some(c)) => {
@@ -166,9 +202,7 @@ pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool
                 }
                 if b.signed != c.signed {
                     // flipping signed to false is always breaking (supply chain)
-                    let sev = if !c.signed && b.signed {
-                        Severity::Breaking
-                    } else if strict {
+                    let sev = if (!c.signed && b.signed) || strict {
                         Severity::Breaking
                     } else {
                         Severity::Warning
@@ -240,7 +274,11 @@ pub fn diff_states(baseline: &TaprootState, current: &TaprootState, strict: bool
             kind: DiffKind::Changed,
             expected: baseline.notes.clone(),
             actual: current.notes.clone(),
-            severity: if strict { Severity::Breaking } else { Severity::Warning },
+            severity: if strict {
+                Severity::Breaking
+            } else {
+                Severity::Warning
+            },
         });
     }
 
@@ -282,7 +320,9 @@ mod tests {
         let mut c = b.clone();
         c.env_vars.insert("NEW".into(), "1".into());
         let diffs = diff_states(&b, &c, false);
-        assert!(diffs.iter().any(|d| d.path == "env_vars.NEW" && d.kind == DiffKind::Added));
+        assert!(diffs
+            .iter()
+            .any(|d| d.path == "env_vars.NEW" && d.kind == DiffKind::Added));
         assert!(has_breaking(&diffs));
     }
 
@@ -299,8 +339,12 @@ mod tests {
     fn ignores_created_at() {
         let mut b = base();
         let mut c = base();
-        b.created_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
-        c.created_at = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        b.created_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        c.created_at = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         assert!(diff_states(&b, &c, true).is_empty());
     }
 
@@ -318,7 +362,21 @@ mod tests {
         let b = base();
         let mut c = b.clone();
         c.base.branch = "feat/foo".into();
-        assert_eq!(diff_states(&b, &c, false).iter().find(|d| d.path == "base.branch").unwrap().severity, Severity::Warning);
-        assert_eq!(diff_states(&b, &c, true).iter().find(|d| d.path == "base.branch").unwrap().severity, Severity::Breaking);
+        assert_eq!(
+            diff_states(&b, &c, false)
+                .iter()
+                .find(|d| d.path == "base.branch")
+                .unwrap()
+                .severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            diff_states(&b, &c, true)
+                .iter()
+                .find(|d| d.path == "base.branch")
+                .unwrap()
+                .severity,
+            Severity::Breaking
+        );
     }
 }

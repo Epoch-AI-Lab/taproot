@@ -32,7 +32,13 @@ pub async fn push_state(
     // auth check if tokens configured
     let actor = match check_auth(&app.fabric, &headers) {
         Ok(a) => a,
-        Err(e) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
 
     // verify hash + signature
@@ -62,7 +68,10 @@ pub async fn push_state(
     }
 
     // policy check: require signed
-    let policy = app.fabric.get_policy(&signed.state.base.repo).unwrap_or_default();
+    let policy = app
+        .fabric
+        .get_policy(&signed.state.base.repo)
+        .unwrap_or_default();
     if policy.require_signed && signed.signature.is_none() {
         return (
             StatusCode::BAD_REQUEST,
@@ -121,7 +130,11 @@ pub async fn get_ref(
     let repo = crate::registry::desanitize(&repo);
     let branch = crate::registry::desanitize(&branch);
     match app.registry.resolve_ref(&repo, &branch) {
-        Ok(Some(hash)) => (StatusCode::OK, Json(serde_json::json!({"repo": repo, "branch": branch, "hash": hash}))).into_response(),
+        Ok(Some(hash)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"repo": repo, "branch": branch, "hash": hash})),
+        )
+            .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "ref not found"})),
@@ -183,7 +196,11 @@ pub async fn set_policy(
     Json(req): Json<SetPolicyReq>,
 ) -> impl IntoResponse {
     if let Err(e) = check_auth(&app.fabric, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
     }
     let repo = crate::registry::desanitize(&repo);
     let mut policy = app.fabric.get_policy(&repo).unwrap_or_default();
@@ -305,11 +322,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/audit", get(get_audit))
         .route("/v1/policy/:repo", get(get_policy).post(set_policy))
         .route("/v1/check", post(check))
-        .route("/health", get(|| async { Json(serde_json::json!({"status":"ok"})) }))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({"status":"ok"})) }),
+        )
         .with_state(state)
 }
 
-pub async fn serve(registry_root: PathBuf, fabric_root: PathBuf, addr: String) -> Result<(), TaprootError> {
+pub async fn serve(
+    registry_root: PathBuf,
+    fabric_root: PathBuf,
+    addr: String,
+) -> Result<(), TaprootError> {
     let registry = Arc::new(Registry::init(&registry_root)?);
     let fabric = Arc::new(Fabric::init(&fabric_root, &registry_root)?);
     let state = Arc::new(AppState {
@@ -320,7 +344,7 @@ pub async fn serve(registry_root: PathBuf, fabric_root: PathBuf, addr: String) -
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .map_err(|e| TaprootError::Io(e))?;
+        .map_err(TaprootError::Io)?;
     tracing::info!(%addr, "taproot registry API listening");
     axum::serve(listener, app)
         .await

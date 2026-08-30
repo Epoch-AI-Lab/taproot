@@ -222,10 +222,14 @@ pub(crate) fn desanitize(s: &str) -> String {
 
 fn validate_non_empty(field: &str, value: &str) -> Result<(), TaprootError> {
     if value.trim().is_empty() {
-        return Err(TaprootError::InvalidKey(format!("{field} must be non-empty")));
+        return Err(TaprootError::InvalidKey(format!(
+            "{field} must be non-empty"
+        )));
     }
     if value.len() > 256 {
-        return Err(TaprootError::InvalidKey(format!("{field} too long (max 256)")));
+        return Err(TaprootError::InvalidKey(format!(
+            "{field} too long (max 256)"
+        )));
     }
     if value.contains('\0') || value.contains('\\') {
         return Err(TaprootError::InvalidKey(format!(
@@ -275,9 +279,7 @@ fn validate_hash(hash: &str) -> Result<(), TaprootError> {
         )));
     }
     if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(TaprootError::InvalidHash(
-            "hash must be hex".to_string(),
-        ));
+        return Err(TaprootError::InvalidHash("hash must be hex".to_string()));
     }
     // Ensure lowercase for consistency (but accept any case on read).
     // Storage uses lowercase hex from StateEngine::hash.
@@ -368,8 +370,13 @@ mod tests {
         let ref_path = reg.refs_dir().join("myapp").join("feat%2Ffoo");
         assert!(ref_path.exists());
         let list = reg.list("myapp").unwrap();
-        assert!(list.iter().any(|(b, h)| b == "feat/foo" && h == &signed.hash));
-        assert_eq!(reg.resolve_ref("myapp", "feat/foo").unwrap(), Some(signed.hash));
+        assert!(list
+            .iter()
+            .any(|(b, h)| b == "feat/foo" && h == &signed.hash));
+        assert_eq!(
+            reg.resolve_ref("myapp", "feat/foo").unwrap(),
+            Some(signed.hash)
+        );
     }
 
     #[test]
@@ -454,7 +461,10 @@ mod tests {
         // Tamper state without updating hash
         signed.state.env_vars.insert("EVIL".into(), "1".into());
         let err = reg.push(&signed).unwrap_err();
-        assert!(matches!(err, TaprootError::HashMismatch { .. } | TaprootError::InvalidSignature));
+        assert!(matches!(
+            err,
+            TaprootError::HashMismatch { .. } | TaprootError::InvalidSignature
+        ));
     }
 
     #[test]
@@ -469,7 +479,10 @@ mod tests {
         signed.state.base.repo = "".into();
         // Need to re-hash to pass hash check but fail repo validation — easiest: push with empty repo directly
         let err = reg.push(&signed).unwrap_err();
-        assert!(matches!(err, TaprootError::InvalidKey(_) | TaprootError::HashMismatch{..}));
+        assert!(matches!(
+            err,
+            TaprootError::InvalidKey(_) | TaprootError::HashMismatch { .. }
+        ));
     }
 
     #[test]
@@ -485,7 +498,10 @@ mod tests {
         let bytes = serde_json::to_vec_pretty(&tampered).unwrap();
         fs::write(&obj_path, bytes).unwrap();
         let err = reg.pull(&hash).unwrap_err();
-        assert!(matches!(err, TaprootError::HashMismatch{..} | TaprootError::InvalidSignature));
+        assert!(matches!(
+            err,
+            TaprootError::HashMismatch { .. } | TaprootError::InvalidSignature
+        ));
     }
 
     #[test]
