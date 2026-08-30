@@ -1,0 +1,14 @@
+{
+  "state": {
+    "version": "1.0",
+    "base": {
+      "repo": "Epoch-AI-Lab/taproot",
+      "branch": "main",
+      "commit": "36c7303"
+    },
+    "created_at": "2026-08-30T10:46:10.124709842Z"
+  },
+  "hash": "75941f7fb5788aa7cfe254184a28271100e9da3bb138ee91c764e5f9d8cdab6d",
+  "signature": "rfLudTBHu6HM+zTpvkT6jSkaj5+9FruNsIHlLMIduyYleM2RGdn4cv6YlKwxwCcQPa9YT9ox2peM2J1Lzt8IDw==",
+  "public_key": "2i4UyQMVJd9cSKllOgE8APowY3u9CICuaFnnkr5RSKw="
+}
