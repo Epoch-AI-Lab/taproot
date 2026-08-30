@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use crate::error::TaprootError;
+use crate::util::atomic_write;
 
 /// A stored keypair — private stays local, public is shared.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,26 +196,6 @@ impl KeyStore {
         }
         Ok(kp)
     }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), TaprootError> {
-    use std::io::Write;
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if !parent.as_os_str().is_empty() && parent != Path::new(".") {
-        fs::create_dir_all(parent)?;
-    }
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(bytes)?;
-    tmp.flush()?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| TaprootError::Io(e.error))?;
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
 }
 
 #[cfg(test)]

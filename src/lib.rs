@@ -8,6 +8,7 @@ pub mod mount;
 pub mod registry;
 pub mod server;
 pub mod state;
+pub(crate) mod util;
 
 pub use engine::StateEngine;
 pub use error::TaprootError;

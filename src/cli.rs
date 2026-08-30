@@ -5,15 +5,16 @@ use clap::{Args, Parser, Subcommand};
 use crate::engine::StateEngine;
 use crate::error::TaprootError;
 use crate::state::TaprootState;
+use crate::util::validate_non_empty;
 
 const DEFAULT_STATE_PATH: &str = ".taproot/state.json";
 
-fn default_state_path() -> PathBuf {
-    PathBuf::from(DEFAULT_STATE_PATH)
+fn resolve_or_default(input: Option<PathBuf>, default: &str) -> PathBuf {
+    input.unwrap_or_else(|| PathBuf::from(default))
 }
 
 fn resolve_state_path(input: Option<PathBuf>) -> PathBuf {
-    input.unwrap_or_else(default_state_path)
+    resolve_or_default(input, DEFAULT_STATE_PATH)
 }
 
 fn display_state_path(path: &Path) -> String {
@@ -229,29 +230,17 @@ pub struct RegistryLogArgs {
 }
 
 const DEFAULT_REGISTRY_PATH: &str = ".taproot/registry";
-
-fn default_registry_path() -> PathBuf {
-    PathBuf::from(DEFAULT_REGISTRY_PATH)
-}
-
-fn resolve_registry_path(input: Option<PathBuf>) -> PathBuf {
-    input.unwrap_or_else(default_registry_path)
-}
-
 const DEFAULT_KEYS_PATH: &str = ".taproot/keys";
 const DEFAULT_FABRIC_PATH: &str = ".taproot/fabric";
 
-fn default_keys_path() -> PathBuf {
-    PathBuf::from(DEFAULT_KEYS_PATH)
+fn resolve_registry_path(input: Option<PathBuf>) -> PathBuf {
+    resolve_or_default(input, DEFAULT_REGISTRY_PATH)
 }
 fn resolve_keys_path(input: Option<PathBuf>) -> PathBuf {
-    input.unwrap_or_else(default_keys_path)
-}
-fn default_fabric_path() -> PathBuf {
-    PathBuf::from(DEFAULT_FABRIC_PATH)
+    resolve_or_default(input, DEFAULT_KEYS_PATH)
 }
 fn resolve_fabric_path(input: Option<PathBuf>) -> PathBuf {
-    input.unwrap_or_else(default_fabric_path)
+    resolve_or_default(input, DEFAULT_FABRIC_PATH)
 }
 
 // ---------------------------------------------------------------------------
@@ -497,60 +486,6 @@ fn print_status_line(ok: bool) {
 fn print_unsigned_warning() {
     println!("warning:    ⚠ UNSIGNED — hash ok, not cryptographically signed");
 }
-
-fn validate_non_empty(field: &str, value: &str) -> Result<(), TaprootError> {
-    if value.trim().is_empty() {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} must be non-empty"
-        )));
-    }
-    if value.len() > 256 {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} too long (max 256)"
-        )));
-    }
-    if value.contains('\0') || value.contains('\\') {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} must not contain null byte or backslash"
-        )));
-    }
-    if value.contains('\n') || value.contains('\r') {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} must not contain newline"
-        )));
-    }
-    // Allow '/' for org/repo and branch names like feat/foo, but block traversal and empty segments
-    if value == "." || value == ".." {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} must not be '.' or '..'"
-        )));
-    }
-    if value.starts_with('/') || value.ends_with('/') {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} must not start or end with '/'"
-        )));
-    }
-    if value.contains("//") {
-        return Err(TaprootError::InvalidKey(format!(
-            "{field} must not contain '//'"
-        )));
-    }
-    for seg in value.split('/') {
-        if seg == "." || seg == ".." {
-            return Err(TaprootError::InvalidKey(format!(
-                "{field} segment must not be '.' or '..'"
-            )));
-        }
-        if seg.is_empty() && value.contains('/') {
-            return Err(TaprootError::InvalidKey(format!(
-                "{field} contains empty segment"
-            )));
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -1006,6 +941,27 @@ pub fn handle_remote(args: RemoteArgs) -> Result<(), TaprootError> {
     }
 }
 
+fn with_auth(
+    mut req: reqwest::blocking::RequestBuilder,
+    token: Option<String>,
+) -> reqwest::blocking::RequestBuilder {
+    if let Some(tok) = token {
+        req = req.header("Authorization", format!("Bearer {tok}"));
+    }
+    req
+}
+
+fn ensure_success(
+    resp: reqwest::blocking::Response,
+    ctx: &str,
+) -> Result<reqwest::blocking::Response, TaprootError> {
+    if !resp.status().is_success() {
+        let txt = resp.text().unwrap_or_default();
+        return Err(TaprootError::InvalidKey(format!("{ctx} failed: {txt}")));
+    }
+    Ok(resp)
+}
+
 pub fn handle_remote_push(args: RemotePushArgs) -> Result<(), TaprootError> {
     let state_path = resolve_state_path(args.state_path);
     let bytes = std::fs::read(&state_path)?;
@@ -1013,19 +969,12 @@ pub fn handle_remote_push(args: RemotePushArgs) -> Result<(), TaprootError> {
     crate::engine::StateEngine::verify(&signed)?;
     let url = format!("{}/v1/states", args.remote.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
-    let mut builder = client.post(&url).json(&signed);
-    if let Some(tok) = args.token {
-        builder = builder.header("Authorization", format!("Bearer {tok}"));
-    }
-    let resp = builder
-        .send()
-        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
-    if !resp.status().is_success() {
-        let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!(
-            "remote push failed: {txt}"
-        )));
-    }
+    let req = with_auth(client.post(&url).json(&signed), args.token);
+    let resp = ensure_success(
+        req.send()
+            .map_err(|e| TaprootError::InvalidKey(e.to_string()))?,
+        "remote push",
+    )?;
     let v: serde_json::Value = resp
         .json()
         .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
@@ -1040,19 +989,12 @@ pub fn handle_remote_pull(args: RemotePullArgs) -> Result<(), TaprootError> {
         args.hash
     );
     let client = reqwest::blocking::Client::new();
-    let mut req = client.get(&url);
-    if let Some(tok) = args.token {
-        req = req.header("Authorization", format!("Bearer {tok}"));
-    }
-    let resp = req
-        .send()
-        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
-    if !resp.status().is_success() {
-        let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!(
-            "remote pull failed: {txt}"
-        )));
-    }
+    let req = with_auth(client.get(&url), args.token);
+    let resp = ensure_success(
+        req.send()
+            .map_err(|e| TaprootError::InvalidKey(e.to_string()))?,
+        "remote pull",
+    )?;
     let signed: crate::state::SignedState = resp
         .json()
         .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
@@ -1080,19 +1022,12 @@ pub fn handle_remote_resolve(args: RemoteResolveArgs) -> Result<(), TaprootError
         branch
     );
     let client = reqwest::blocking::Client::new();
-    let mut req = client.get(&url);
-    if let Some(tok) = args.token {
-        req = req.header("Authorization", format!("Bearer {tok}"));
-    }
-    let resp = req
-        .send()
-        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
-    if !resp.status().is_success() {
-        let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!(
-            "remote resolve failed: {txt}"
-        )));
-    }
+    let req = with_auth(client.get(&url), args.token);
+    let resp = ensure_success(
+        req.send()
+            .map_err(|e| TaprootError::InvalidKey(e.to_string()))?,
+        "remote resolve",
+    )?;
     let v: serde_json::Value = resp
         .json()
         .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
@@ -1104,17 +1039,12 @@ pub fn handle_remote_check(args: RemoteCheckArgs) -> Result<(), TaprootError> {
     let url = format!("{}/v1/check", args.remote.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let body = serde_json::json!({"baseline_hash": args.baseline_hash, "current_hash": args.current_hash, "strict": args.strict});
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
-    if !resp.status().is_success() {
-        let txt = resp.text().unwrap_or_default();
-        return Err(TaprootError::InvalidKey(format!(
-            "remote check failed: {txt}"
-        )));
-    }
+    let req = client.post(&url).json(&body);
+    let resp = ensure_success(
+        req.send()
+            .map_err(|e| TaprootError::InvalidKey(e.to_string()))?,
+        "remote check",
+    )?;
     let v: serde_json::Value = resp
         .json()
         .map_err(|e| TaprootError::InvalidKey(e.to_string()))?;
