@@ -11,11 +11,11 @@ REGISTRY_TOKEN="${INPUT_REGISTRY_TOKEN:-}"
 REGISTRY_PATH="${INPUT_REGISTRY_PATH:-.taproot/registry}"
 
 # Validate baseline ref to prevent git argument injection
-if [[ "$BASELINE_REF" == -* ]] || [[ "$BASELINE_REF" == *$'\n'* ]] || [[ "$BASELINE_REF" == *$'\0'* ]]; then
+if [[ "$BASELINE_REF" == -* ]] || [[ "$BASELINE_REF" == *$'\n'* ]]; then
   echo "::error::Invalid baseline-ref: must not start with '-' or contain newline"
   exit 2
 fi
-if [[ "$BASELINE_PATH" == *$'\n'* ]] || [[ "$BASELINE_PATH" == *$'\0'* ]]; then
+if [[ "$BASELINE_PATH" == *$'\n'* ]]; then
   echo "::error::Invalid baseline-path: must not contain newline"
   exit 2
 fi
