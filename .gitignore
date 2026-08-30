@@ -1,1 +1,5 @@
 /target
+.useit/
+.taproot/registry/
+.taproot/fabric/
+.taproot/keys/

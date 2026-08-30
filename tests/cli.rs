@@ -1,5 +1,7 @@
-use std::path::PathBuf;
-use taproot::cli::{handle_init, handle_mount, handle_status, handle_verify, InitArgs, MountArgs};
+use taproot::cli::{
+    handle_check, handle_init, handle_mount, handle_status, handle_verify, CheckArgs, InitArgs,
+    MountArgs,
+};
 
 fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -96,6 +98,157 @@ fn mount_no_fuse_succeeds_on_valid_dir() {
         no_fuse: true,
     };
     assert!(handle_mount(args).is_ok());
+}
+
+#[test]
+fn check_passes_on_identical_signed_states() {
+    let dir = temp_dir();
+    let baseline = dir.path().join("baseline.json");
+    let head = dir.path().join("head.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(baseline.clone()),
+        no_sign: false,
+    })
+    .unwrap();
+    std::fs::copy(&baseline, &head).unwrap();
+    assert!(handle_check(CheckArgs {
+        baseline: baseline.clone(),
+        state_path: Some(head),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_ok());
+}
+
+#[test]
+fn check_fails_on_commit_drift_strict() {
+    let dir = temp_dir();
+    let baseline = dir.path().join("baseline.json");
+    let head = dir.path().join("head.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(baseline.clone()),
+        no_sign: false,
+    })
+    .unwrap();
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "deadbeef".into(),
+        state_path: Some(head.clone()),
+        no_sign: false,
+    })
+    .unwrap();
+    // strict=true => branch/commit drift is breaking
+    assert!(handle_check(CheckArgs {
+        baseline: baseline.clone(),
+        state_path: Some(head.clone()),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
+    // strict=false => warning only, should pass when allow_warnings false? actually warnings pass without strict
+    // with allow_warnings=true and strict=true, warnings pass
+    assert!(handle_check(CheckArgs {
+        baseline,
+        state_path: Some(head),
+        json: false,
+        strict: false,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_ok());
+}
+
+#[test]
+fn check_fails_on_unsigned_strict() {
+    let dir = temp_dir();
+    let baseline = dir.path().join("baseline.json");
+    let head = dir.path().join("head.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(baseline.clone()),
+        no_sign: false,
+    })
+    .unwrap();
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(head.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+    assert!(handle_check(CheckArgs {
+        baseline,
+        state_path: Some(head),
+        json: true,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
+}
+
+#[test]
+fn check_fails_on_missing_baseline() {
+    let dir = temp_dir();
+    let head = dir.path().join("head.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(head.clone()),
+        no_sign: false,
+    })
+    .unwrap();
+    assert!(handle_check(CheckArgs {
+        baseline: dir.path().join("nope.json"),
+        state_path: Some(head),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
+}
+
+#[test]
+fn check_detects_env_drift() {
+    use taproot::{StateEngine, TaprootState};
+    let dir = temp_dir();
+    let baseline = dir.path().join("baseline.json");
+    let head = dir.path().join("head.json");
+    // Create baseline with env FOO=bar
+    let state = TaprootState::new("myapp", "main", "abc123").with_env("FOO", "bar");
+    let (priv_key, _) = StateEngine::generate_keypair();
+    let signed = StateEngine::sign(&state, &priv_key).unwrap();
+    StateEngine::save(&baseline, &signed).unwrap();
+    // Head adds env NEW=1
+    let mut state2 = state.clone();
+    state2.env_vars.insert("NEW".into(), "1".into());
+    let signed2 = StateEngine::sign(&state2, &priv_key).unwrap();
+    StateEngine::save(&head, &signed2).unwrap();
+    assert!(handle_check(CheckArgs {
+        baseline,
+        state_path: Some(head),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
 }
 
 #[test]

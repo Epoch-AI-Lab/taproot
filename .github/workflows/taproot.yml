@@ -1,0 +1,41 @@
+name: taproot
+
+on:
+  pull_request:
+    paths:
+      - ".taproot/state.json"
+      - "src/**"
+      - "action.yml"
+      - "scripts/**"
+      - ".github/workflows/taproot.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".taproot/state.json"
+      - "src/**"
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build taproot
+        run: cargo build --locked
+
+      - name: Verify head state
+        run: cargo run -- verify --state-path .taproot/state.json || echo "no head state — first init?"
+
+      - name: Baseline check (strict)
+        uses: ./
+        with:
+          state-path: ".taproot/state.json"
+          baseline-ref: ${{ github.base_ref }}
+          fail-on-drift: "true"
