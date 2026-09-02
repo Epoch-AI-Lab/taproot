@@ -971,24 +971,29 @@ pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
     }
 
     // Env-var drift is the intended writable surface — adopting it is the
-    // point of sync. Refuse identity drift (base, runtimes, containers,
-    // version) unless --force: that usually means the drift file belongs to
-    // a different repo or baseline.
-    let identity_breaking: Vec<&str> = diffs
+    // point of sync. Refuse identity drift unless --force: that usually
+    // means the drift file belongs to a different repo or baseline.
+    // Keyed on path, not severity: base.branch/base.commit are only Warning
+    // under non-strict diffing but still identity.
+    let identity_drift: Vec<&str> = diffs
         .iter()
         .filter(|d| {
-            d.severity == crate::diff::Severity::Breaking && !d.path.starts_with("env_vars.")
+            d.path.starts_with("base.")
+                || d.path.starts_with("runtimes.")
+                || d.path.starts_with("containers.")
+                || d.path == "version"
+                || d.path == "notes"
         })
         .map(|d| d.path.as_str())
         .collect();
-    if !identity_breaking.is_empty() && !args.force {
+    if !identity_drift.is_empty() && !args.force {
         eprintln!(
             "✗ drift touches non-env fields ({}) — refusing to adopt without --force",
-            identity_breaking.join(", ")
+            identity_drift.join(", ")
         );
         return Err(TaprootError::Drift {
-            breaking: identity_breaking.len(),
-            warning: diffs.len() - identity_breaking.len(),
+            breaking: identity_drift.len(),
+            warning: diffs.len() - identity_drift.len(),
         });
     }
 

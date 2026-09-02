@@ -716,27 +716,34 @@ pub fn mount_readonly(
     fuser::mount2(fs, mountpoint, &options).map_err(|e| TaprootError::Mount(e.to_string()))?;
 
     let j = journal.lock().unwrap();
+    Ok(outcome_from_journal(&j, signed))
+}
+
+/// Decide the mount outcome from the journal. Extracted from
+/// `mount_readonly` so the drift/raw-env branches are testable without a
+/// real mount.
+fn outcome_from_journal(j: &Journal, signed: &SignedState) -> MountOutcome {
     if j.drifted() {
         match extract_env_drift(signed, &j.env_data) {
-            Ok(drift) => Ok(MountOutcome {
+            Ok(drift) => MountOutcome {
                 drift: Some(drift),
                 raw_env: None,
                 parse_error: None,
-            }),
+            },
             // Unparseable env must not destroy the session: hand back the
             // raw bytes so the CLI can persist them.
-            Err(e) => Ok(MountOutcome {
+            Err(e) => MountOutcome {
                 drift: None,
                 raw_env: Some(j.env_data.clone()),
                 parse_error: Some(e),
-            }),
+            },
         }
     } else {
-        Ok(MountOutcome {
+        MountOutcome {
             drift: None,
             raw_env: None,
             parse_error: None,
-        })
+        }
     }
 }
 
@@ -873,6 +880,36 @@ mod tests {
         // value may contain '='
         let m = parse_env("URL=http://x?a=b\n").unwrap();
         assert_eq!(m.get("URL").unwrap(), "http://x?a=b");
+    }
+
+    #[test]
+    fn outcome_preserves_unparseable_env_as_raw_bytes() {
+        let signed = sample_signed();
+        let mut fs = TaprootFS::new(&signed);
+        let env_ino = fs.lookup_ino(ROOT_INO, "env").unwrap();
+        // binary garbage with no newline and no '='
+        fs.apply_truncate(env_ino, 0).unwrap();
+        fs.apply_write(env_ino, 0, &[0xFF, 0xFE, 0x00, 0x01])
+            .unwrap();
+
+        let j = fs.journal.lock().unwrap();
+        let outcome = outcome_from_journal(&j, &signed);
+        assert!(outcome.drift.is_none());
+        assert!(outcome.raw_env.is_some());
+        assert!(outcome.parse_error.is_some());
+        assert_eq!(
+            outcome.raw_env.as_deref().unwrap(),
+            &[0xFF, 0xFE, 0x00, 0x01]
+        );
+
+        // clean journal → no drift, no raw
+        drop(j);
+        let mut fs2 = TaprootFS::new(&signed);
+        let j2 = fs2.journal.lock().unwrap();
+        let outcome2 = outcome_from_journal(&j2, &signed);
+        assert!(outcome2.drift.is_none());
+        assert!(outcome2.raw_env.is_none());
+        assert!(outcome2.parse_error.is_none());
     }
 
     #[test]

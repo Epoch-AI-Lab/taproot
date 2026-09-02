@@ -446,6 +446,49 @@ fn sync_refuses_identity_drift_without_force() {
 }
 
 #[test]
+fn sync_refuses_branch_commit_drift_without_force() {
+    use taproot::{StateEngine, TaprootState};
+    let (_dir, state_path, drift_path) = sync_setup();
+    // same repo, different commit — base.commit is only a Warning under
+    // non-strict diffing, so the gate must catch it by path, not severity
+    let state = TaprootState::new("myapp", "main", "deadbeef").with_env("FOO", "bar");
+    let hash = StateEngine::hash(&state).unwrap();
+    taproot::StateEngine::save(
+        &drift_path,
+        &taproot::SignedState {
+            state,
+            hash,
+            signature: None,
+            public_key: None,
+        },
+    )
+    .unwrap();
+
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        dry_run: false,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_err());
+    // drift file preserved for --force
+    assert!(drift_path.exists());
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        dry_run: false,
+        force: true,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok());
+    let adopted = taproot::StateEngine::load(&state_path).unwrap();
+    assert_eq!(adopted.state.base.commit, "deadbeef");
+}
+
+#[test]
 fn sign_state_with_keys_uses_stored_key() {
     use taproot::cli::sign_state_with_keys;
     use taproot::keys::KeyStore;
