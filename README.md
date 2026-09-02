@@ -48,6 +48,7 @@ We are building the wedge primitive:
 - [x] Signed state registry (local content-addressed, `taproot registry push/pull/list`)
 - [x] Key management (`taproot keys generate/list/rotate`)
 - [x] Managed fabric + registry API (`taproot serve`, `taproot remote`, `taproot fabric` audit/policy/tokens)
+- [x] Drift loop (v0.1.0): writable `env` file in the mount, drift captured on unmount, `taproot sync` to review, re-sign, and adopt
 
 ## Open source
 

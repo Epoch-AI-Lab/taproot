@@ -47,12 +47,14 @@ pub struct Cli {
 pub enum Commands {
     /// Initialise a new taproot state snapshot
     Init(InitArgs),
-    /// Mount a taproot state (v0.0.1: read-only FUSE)
+    /// Mount a taproot state (env file writable; edits captured as drift)
     Mount(MountArgs),
     /// Show current state status
     Status(StatusArgs),
     /// Verify state signature and hash
     Verify(VerifyArgs),
+    /// Review captured drift and re-sign it into the current state
+    Sync(SyncArgs),
     /// Check current state against a baseline for drift (strict)
     Check(CheckArgs),
     /// Local signed state registry (content-addressed)
@@ -102,6 +104,37 @@ pub struct MountArgs {
     /// Disable FUSE mount — just print header and exit (useful in CI without FUSE)
     #[arg(long = "no-fuse", default_value_t = false)]
     pub no_fuse: bool,
+
+    /// Where to write captured drift (default: state.drift.json next to the state file)
+    #[arg(long, value_name = "PATH")]
+    pub drift_out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Path to baseline state file to re-sign into (default: .taproot/state.json)
+    #[arg(long, value_name = "PATH")]
+    pub state_path: Option<PathBuf>,
+
+    /// Path to drifted state to adopt (default: state.drift.json next to the state file)
+    #[arg(long, value_name = "PATH")]
+    pub from: Option<PathBuf>,
+
+    /// Show the diff report without adopting anything
+    #[arg(long = "dry-run", default_value_t = false)]
+    pub dry_run: bool,
+
+    /// Adopt drift that touches non-env fields (base, runtimes, containers)
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+
+    /// Skip signing (store hash only, no ed25519 signature)
+    #[arg(long = "no-sign", default_value_t = false)]
+    pub no_sign: bool,
+
+    /// Keep the drift file after a successful sync
+    #[arg(long, default_value_t = false, conflicts_with = "dry_run")]
+    pub keep: bool,
 }
 
 #[derive(Debug, Args)]
@@ -519,7 +552,12 @@ pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
                 ))
             }) {
                 Ok((k, info)) => (k, Some(info)),
-                Err(_) => (StateEngine::generate_keypair().0, None),
+                Err(e) => {
+                    println!(
+                        "warning: could not load default key ({e}) — signing with ephemeral key"
+                    );
+                    (StateEngine::generate_keypair().0, None)
+                }
             }
         } else {
             (StateEngine::generate_keypair().0, None)
@@ -573,6 +611,79 @@ pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
     println!("[next: taproot mount <path>]");
 
     Ok(())
+}
+
+fn default_drift_path(state_path: &Path) -> PathBuf {
+    match state_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join("state.drift.json"),
+        _ => PathBuf::from("state.drift.json"),
+    }
+}
+
+/// Refuse when two paths resolve to the same file — e.g. `sync --from`
+/// pointing at the baseline itself, or `--drift-out` overwriting it.
+fn ensure_distinct(a: &Path, b: &Path, what: &str) -> Result<(), TaprootError> {
+    // canonicalize resolves symlinks; fall back to cwd-relative absolutization
+    // for paths that don't exist yet
+    let resolve = |p: &Path| -> PathBuf {
+        p.canonicalize().unwrap_or_else(|_| match p.is_absolute() {
+            true => p.to_path_buf(),
+            false => std::env::current_dir().unwrap_or_default().join(p),
+        })
+    };
+    if resolve(a) == resolve(b) {
+        return Err(TaprootError::Mount(format!(
+            "{what} points at the baseline state file itself ({}): refusing",
+            display_state_path(b)
+        )));
+    }
+    Ok(())
+}
+
+/// Sign a state for adoption: stored default key if present, else ephemeral;
+/// or hash-only with --no-sign.
+pub fn sign_state_with_keys(
+    state: TaprootState,
+    no_sign: bool,
+    keys_path: &Path,
+) -> Result<crate::state::SignedState, TaprootError> {
+    if no_sign {
+        let hash = StateEngine::hash(&state)?;
+        return Ok(crate::state::SignedState {
+            state,
+            hash,
+            signature: None,
+            public_key: None,
+        });
+    }
+    if keys_path.exists() {
+        match crate::keys::KeyStore::init(keys_path) {
+            Ok(ks) => match ks.default_key() {
+                Ok(kp) => {
+                    let preview = &kp.public_key[..16.min(kp.public_key.len())];
+                    println!("signing with key {} ({preview})", kp.id);
+                    return StateEngine::sign(&state, &kp.private_key);
+                }
+                Err(e) => println!(
+                    "warning: could not load default key ({e}) — signing with ephemeral key"
+                ),
+            },
+            Err(e) => {
+                println!("warning: could not open keystore ({e}) — signing with ephemeral key")
+            }
+        }
+    } else {
+        println!("signing with ephemeral key (no keys found, run `taproot keys generate`)");
+    }
+    let (priv_key, _) = StateEngine::generate_keypair();
+    StateEngine::sign(&state, &priv_key)
+}
+
+fn sign_for_adoption(
+    state: TaprootState,
+    no_sign: bool,
+) -> Result<crate::state::SignedState, TaprootError> {
+    sign_state_with_keys(state, no_sign, &resolve_keys_path(None))
 }
 
 pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
@@ -656,12 +767,55 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
     }
 
     println!(
-        "attempting FUSE mount at {} (read-only, Ctrl-C to unmount)...",
+        "attempting FUSE mount at {} (env writable, Ctrl-C to unmount)...",
         args.path.display()
     );
+    let drift_path = args
+        .drift_out
+        .clone()
+        .unwrap_or_else(|| default_drift_path(&state_path));
+    ensure_distinct(&state_path, &drift_path, "--drift-out")?;
     match crate::mount::mount_readonly(&args.path, &signed) {
-        Ok(()) => {
+        Ok(outcome) => {
             print_status_line(true);
+            if let Some(drift) = outcome.drift {
+                if let Err(e) = StateEngine::save(&drift_path, &drift) {
+                    eprintln!(
+                        "✗ mounted OK, but failed to save drift to {}: {e}",
+                        display_state_path(&drift_path)
+                    );
+                    return Err(e);
+                }
+                println!();
+                println!("drift:      captured — env was edited during the mount");
+                println!("path:       {}", display_state_path(&drift_path));
+                println!("[next: taproot sync to review, sign, and adopt]");
+            } else if let Some(raw) = outcome.raw_env {
+                let raw_path = drift_path.with_extension("env.txt");
+                let parse_msg = outcome
+                    .parse_error
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "unparseable env".to_string());
+                match std::fs::write(&raw_path, &raw) {
+                    Ok(()) => {
+                        println!();
+                        println!("drift:      ⚠ env was edited but could not be read: {parse_msg}");
+                        println!(
+                            "raw:        session preserved in {}",
+                            display_state_path(&raw_path)
+                        );
+                        println!("[inspect the raw env file, fix or restore, then re-sign]");
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "✗ mounted OK, but failed to save raw env to {}: {e}",
+                            display_state_path(&raw_path)
+                        );
+                        return Err(TaprootError::Io(e));
+                    }
+                }
+            }
             println!();
             Ok(())
         }
@@ -751,6 +905,111 @@ pub fn handle_verify(args: VerifyArgs) -> Result<(), TaprootError> {
             Err(e)
         }
     }
+}
+
+pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
+    let state_path = resolve_state_path(args.state_path);
+    let drift_path = args
+        .from
+        .clone()
+        .unwrap_or_else(|| default_drift_path(&state_path));
+    tracing::info!(?state_path, ?drift_path, "sync");
+    ensure_distinct(&state_path, &drift_path, "--from")?;
+
+    let baseline = StateEngine::load(&state_path)?;
+    let current = StateEngine::load(&drift_path)?;
+
+    println!("TAPROOT SYNC");
+    println!("─────────────────────────────────────────");
+    println!(
+        "baseline:   sha256:{} ({})",
+        baseline.hash,
+        display_state_path(&state_path)
+    );
+    println!(
+        "drift:      sha256:{} ({})",
+        current.hash,
+        display_state_path(&drift_path)
+    );
+    println!();
+
+    let diffs = crate::diff::diff_states(&baseline.state, &current.state, false);
+    if diffs.is_empty() {
+        println!("no drift — states are identical");
+        if !args.keep && std::fs::remove_file(&drift_path).is_ok() {
+            println!("removed:    {}", display_state_path(&drift_path));
+        }
+        return Ok(());
+    }
+
+    println!(
+        "drift ({} field{}):",
+        diffs.len(),
+        if diffs.len() == 1 { "" } else { "s" }
+    );
+    for d in &diffs {
+        let marker = match d.kind {
+            crate::diff::DiffKind::Added => "+",
+            crate::diff::DiffKind::Removed => "-",
+            crate::diff::DiffKind::Changed => "~",
+        };
+        println!("  {marker} {}", d.path);
+        if let Some(e) = &d.expected {
+            println!("      expected: {e}");
+        }
+        if let Some(a) = &d.actual {
+            println!("      actual:   {a}");
+        }
+        println!("      severity: {:?}", d.severity);
+    }
+    println!();
+
+    if args.dry_run {
+        println!("dry-run — nothing adopted.");
+        println!("[re-run without --dry-run to sign and adopt]");
+        return Ok(());
+    }
+
+    // Env-var drift is the intended writable surface — adopting it is the
+    // point of sync. Refuse identity drift unless --force: that usually
+    // means the drift file belongs to a different repo or baseline.
+    // Keyed on path, not severity: base.branch/base.commit are only Warning
+    // under non-strict diffing but still identity.
+    let identity_drift: Vec<&str> = diffs
+        .iter()
+        .filter(|d| {
+            d.path.starts_with("base.")
+                || d.path.starts_with("runtimes.")
+                || d.path.starts_with("containers.")
+                || d.path == "version"
+                || d.path == "notes"
+        })
+        .map(|d| d.path.as_str())
+        .collect();
+    if !identity_drift.is_empty() && !args.force {
+        eprintln!(
+            "✗ drift touches non-env fields ({}) — refusing to adopt without --force",
+            identity_drift.join(", ")
+        );
+        return Err(TaprootError::Drift {
+            breaking: identity_drift.len(),
+            warning: diffs.len() - identity_drift.len(),
+        });
+    }
+
+    let signed_new = sign_for_adoption(current.state.clone(), args.no_sign)?;
+    StateEngine::save(&state_path, &signed_new)?;
+    if !args.keep {
+        std::fs::remove_file(&drift_path)?;
+    }
+    println!("adopted:    sha256:{}", signed_new.hash);
+    if signed_new.signature.is_none() {
+        print_unsigned_warning();
+    }
+    println!("path:       {}", display_state_path(&state_path));
+    println!();
+    print_status_line(true);
+    Ok(())
 }
 
 pub fn handle_keys(args: KeysArgs) -> Result<(), TaprootError> {

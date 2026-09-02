@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use fuser::{
@@ -27,14 +28,36 @@ struct Inode {
     kind: FileType,
     data: Vec<u8>,
     children: Vec<u64>,
+    /// Writable inodes accept writes; everything else stays read-only.
+    writable: bool,
+}
+
+/// Captures writes to the env file so drift can be extracted after unmount.
+#[derive(Debug, Default)]
+struct Journal {
+    env_original: Vec<u8>,
+    env_data: Vec<u8>,
+}
+
+impl Journal {
+    fn drifted(&self) -> bool {
+        self.env_data != self.env_original
+    }
 }
 
 fn now() -> SystemTime {
     SystemTime::now()
 }
 
-fn file_attr(ino: u64, size: u64, kind: FileType) -> FileAttr {
+fn file_attr(ino: u64, size: u64, kind: FileType, writable: bool) -> FileAttr {
     let t = now();
+    let perm = if kind == FileType::Directory {
+        0o555
+    } else if writable {
+        0o644
+    } else {
+        0o444
+    };
     FileAttr {
         ino,
         size,
@@ -46,11 +69,7 @@ fn file_attr(ino: u64, size: u64, kind: FileType) -> FileAttr {
         ctime: t,
         crtime: t,
         kind,
-        perm: if kind == FileType::Directory {
-            0o555
-        } else {
-            0o444
-        },
+        perm,
         nlink: if kind == FileType::Directory { 2 } else { 1 },
         uid: unsafe { libc::getuid() } as u32,
         gid: unsafe { libc::getgid() } as u32,
@@ -83,6 +102,8 @@ pub struct TaprootFS {
     /// (parent_ino, name) -> ino
     lookup: HashMap<(u64, String), u64>,
     next_ino: u64,
+    env_ino: Option<u64>,
+    journal: Arc<Mutex<Journal>>,
 }
 
 impl TaprootFS {
@@ -91,6 +112,8 @@ impl TaprootFS {
             inodes: HashMap::new(),
             lookup: HashMap::new(),
             next_ino: ROOT_INO + 1,
+            env_ino: None,
+            journal: Arc::new(Mutex::new(Journal::default())),
         };
 
         fs.inodes.insert(
@@ -102,6 +125,7 @@ impl TaprootFS {
                 kind: FileType::Directory,
                 data: Vec::new(),
                 children: Vec::new(),
+                writable: false,
             },
         );
 
@@ -109,14 +133,21 @@ impl TaprootFS {
         let state_json = serde_json::to_string_pretty(signed).unwrap_or_else(|_| "{}".into());
         let env_content = Self::env_content(signed);
 
-        fs.add_file(ROOT_INO, "README.taproot", readme.into_bytes());
-        fs.add_file(ROOT_INO, "state.json", state_json.into_bytes());
-        fs.add_file(ROOT_INO, "env", env_content.into_bytes());
-        fs.add_file(ROOT_INO, "hash", signed.hash.clone().into_bytes());
+        fs.add_file(ROOT_INO, "README.taproot", readme.into_bytes(), false);
+        fs.add_file(ROOT_INO, "state.json", state_json.into_bytes(), false);
+        let env_ino = fs.add_file(ROOT_INO, "env", env_content.clone().into_bytes(), true);
+        fs.env_ino = Some(env_ino);
+        {
+            let mut j = fs.journal.lock().unwrap();
+            j.env_original = env_content.into_bytes();
+            j.env_data = j.env_original.clone();
+        }
+        fs.add_file(ROOT_INO, "hash", signed.hash.clone().into_bytes(), false);
         fs.add_file(
             ROOT_INO,
             "version",
             signed.state.version.clone().into_bytes(),
+            false,
         );
 
         let runtimes_ino = fs.add_dir(ROOT_INO, "runtimes");
@@ -132,7 +163,7 @@ impl TaprootFS {
             if fs.lookup.contains_key(&(runtimes_ino, fname.clone())) {
                 continue;
             }
-            fs.add_file(runtimes_ino, &fname, content.into_bytes());
+            fs.add_file(runtimes_ino, &fname, content.into_bytes(), false);
         }
 
         let containers_ino = fs.add_dir(ROOT_INO, "containers");
@@ -148,7 +179,7 @@ impl TaprootFS {
             if fs.lookup.contains_key(&(containers_ino, fname.clone())) {
                 continue;
             }
-            fs.add_file(containers_ino, &fname, content.into_bytes());
+            fs.add_file(containers_ino, &fname, content.into_bytes(), false);
         }
 
         fs
@@ -162,16 +193,20 @@ impl TaprootFS {
             "unsigned"
         };
         format!(
-            "taproot read-only mount\n\
-             =======================\n\
+            "taproot mount\n\
+             =============\n\
              repo: {}  branch: {}  commit: {}\n\
              state: {sig}  sha256:{}\n\
              runtimes: {}  containers: {}  env-vars: {}\n\
              \n\
-             This filesystem is read-only. All writes return EROFS.\n\
+             Read-only, except one file:\n\
+               env — edit key=value lines to change env-vars.\n\
+               On unmount, edits are captured as drift; run\n\
+               `taproot sync` to review, sign, and adopt them.\n\
+             \n\
              Files:\n\
                state.json  — pretty-printed SignedState\n\
-               env         — key=value list\n\
+               env         — key=value list (WRITABLE)\n\
                hash        — sha256 hex\n\
                version     — schema version\n\
                runtimes/   — per-runtime virtual files\n\
@@ -200,7 +235,7 @@ impl TaprootFS {
         out
     }
 
-    fn add_file(&mut self, parent: u64, name: &str, data: Vec<u8>) -> u64 {
+    fn add_file(&mut self, parent: u64, name: &str, data: Vec<u8>, writable: bool) -> u64 {
         let ino = self.next_ino;
         self.next_ino += 1;
         let inode = Inode {
@@ -210,6 +245,7 @@ impl TaprootFS {
             kind: FileType::RegularFile,
             data,
             children: Vec::new(),
+            writable,
         };
         self.inodes.insert(ino, inode);
         self.lookup.insert((parent, name.to_string()), ino);
@@ -229,6 +265,7 @@ impl TaprootFS {
             kind: FileType::Directory,
             data: Vec::new(),
             children: Vec::new(),
+            writable: false,
         };
         self.inodes.insert(ino, inode);
         self.lookup.insert((parent, name.to_string()), ino);
@@ -261,7 +298,53 @@ impl TaprootFS {
         } else {
             inode.data.len() as u64
         };
-        Some(file_attr(ino, size, inode.kind))
+        Some(file_attr(ino, size, inode.kind, inode.writable))
+    }
+
+    /// Apply a write to a writable inode. Shared by the FUSE `write` handler
+    /// and tests so the journal/overlay logic is testable without a mount.
+    fn apply_write(&mut self, ino: u64, offset: i64, data: &[u8]) -> Result<u32, libc::c_int> {
+        let inode = self.inodes.get_mut(&ino).ok_or(libc::ENOENT)?;
+        if inode.kind == FileType::Directory {
+            return Err(libc::EISDIR);
+        }
+        if !inode.writable {
+            return Err(EROFS);
+        }
+        if offset < 0 {
+            return Err(libc::EINVAL);
+        }
+        let off = offset as usize;
+        if off > inode.data.len() {
+            inode.data.resize(off, 0);
+        }
+        let end = off + data.len();
+        if end > inode.data.len() {
+            inode.data.resize(end, 0);
+        }
+        inode.data[off..end].copy_from_slice(data);
+        if self.env_ino == Some(ino) {
+            let mut j = self.journal.lock().unwrap();
+            j.env_data = inode.data.clone();
+        }
+        Ok(data.len() as u32)
+    }
+
+    /// Truncate/extend a writable inode to `size` (FUSE setattr with size).
+    fn apply_truncate(&mut self, ino: u64, size: u64) -> Result<(), libc::c_int> {
+        let inode = self.inodes.get_mut(&ino).ok_or(libc::ENOENT)?;
+        if inode.kind == FileType::Directory {
+            return Err(libc::EISDIR);
+        }
+        if !inode.writable {
+            return Err(EROFS);
+        }
+        inode.data.resize(size as usize, 0);
+        if self.env_ino == Some(ino) {
+            let mut j = self.journal.lock().unwrap();
+            j.env_data = inode.data.clone();
+        }
+        Ok(())
     }
 }
 
@@ -294,20 +377,25 @@ impl Filesystem for TaprootFS {
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        if (flags & libc::O_TRUNC) != 0 || (flags & libc::O_CREAT) != 0 {
-            reply.error(EROFS);
-            return;
-        }
-        let accmode = flags & libc::O_ACCMODE;
-        if accmode == libc::O_WRONLY || accmode == libc::O_RDWR {
-            reply.error(EROFS);
-            return;
-        }
-        if self.inodes.contains_key(&ino) {
-            reply.opened(0, 0);
-        } else {
+        let Some(inode) = self.inodes.get(&ino) else {
             reply.error(libc::ENOENT);
+            return;
+        };
+        let wants_write = {
+            let accmode = flags & libc::O_ACCMODE;
+            (flags & libc::O_TRUNC) != 0 || accmode == libc::O_WRONLY || accmode == libc::O_RDWR
+        };
+        if wants_write && !inode.writable {
+            reply.error(EROFS);
+            return;
         }
+        if (flags & libc::O_TRUNC) != 0 {
+            if let Err(e) = self.apply_truncate(ino, 0) {
+                reply.error(e);
+                return;
+            }
+        }
+        reply.opened(0, 0);
     }
 
     fn read(
@@ -406,22 +494,25 @@ impl Filesystem for TaprootFS {
         reply.ok();
     }
 
-    // --- read-only denials ---
     fn write(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
+        ino: u64,
         _fh: u64,
-        _offset: i64,
-        _data: &[u8],
+        offset: i64,
+        data: &[u8],
         _write_flags: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        reply.error(EROFS);
+        match self.apply_write(ino, offset, data) {
+            Ok(n) => reply.written(n),
+            Err(e) => reply.error(e),
+        }
     }
 
+    // --- read-only denials ---
     fn create(
         &mut self,
         _req: &Request<'_>,
@@ -484,11 +575,11 @@ impl Filesystem for TaprootFS {
     fn setattr(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
+        ino: u64,
         _mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
-        _size: Option<u64>,
+        size: Option<u64>,
         _atime: Option<TimeOrNow>,
         _mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
@@ -499,6 +590,23 @@ impl Filesystem for TaprootFS {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
+        // Only size changes on writable inodes are honored (truncate).
+        if let Some(sz) = size {
+            match self.apply_truncate(ino, sz) {
+                Ok(()) => {
+                    if let Some(attr) = self.getattr_for(ino) {
+                        reply.attr(&TTL, &attr);
+                    } else {
+                        reply.error(libc::ENOENT);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    reply.error(e);
+                    return;
+                }
+            }
+        }
         reply.error(EROFS);
     }
 }
@@ -507,10 +615,80 @@ impl Filesystem for TaprootFS {
 // Public mount helper
 // ---------------------------------------------------------------------------
 
-/// Mount a read-only FUSE filesystem at `mountpoint` reflecting `signed`.
+// ---------------------------------------------------------------------------
+// Drift extraction
+// ---------------------------------------------------------------------------
+
+/// Parse a `key=value` env file back into a map. Blank lines are skipped;
+/// anything without `=` is an error.
+pub fn parse_env(content: &str) -> Result<BTreeMap<String, String>, TaprootError> {
+    let mut map = BTreeMap::new();
+    for (idx, line) in content.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            return Err(TaprootError::Mount(format!(
+                "malformed env line {}: expected key=value",
+                idx + 1
+            )));
+        };
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(TaprootError::Mount(format!(
+                "malformed env line {}: empty key",
+                idx + 1
+            )));
+        }
+        map.insert(k.to_string(), v.to_string());
+    }
+    Ok(map)
+}
+
+/// Build a drifted (unsigned) SignedState from the mounted env file contents.
+/// The new state gets a fresh hash; signature is dropped because the state
+/// no longer matches the signed baseline.
+pub fn extract_env_drift(
+    signed: &SignedState,
+    env_content: &[u8],
+) -> Result<SignedState, TaprootError> {
+    let text = std::str::from_utf8(env_content)
+        .map_err(|e| TaprootError::Mount(format!("env file is not utf-8: {e}")))?;
+    let env_vars = parse_env(text)?;
+    let mut state = signed.state.clone();
+    state.env_vars = env_vars;
+    state.created_at = chrono::Utc::now();
+    let hash = crate::engine::StateEngine::hash(&state)?;
+    Ok(SignedState {
+        state,
+        hash,
+        signature: None,
+        public_key: None,
+    })
+}
+
+/// Result of a mount session after unmount.
+#[derive(Debug)]
+pub struct MountOutcome {
+    /// Present when the env file was edited and parsed back into a state.
+    pub drift: Option<SignedState>,
+    /// Raw edited env bytes, present when parsing into a state failed.
+    /// The session's edits survive in these bytes even though no state
+    /// could be built from them.
+    pub raw_env: Option<Vec<u8>>,
+    /// Parse error accompanying `raw_env`.
+    pub parse_error: Option<TaprootError>,
+}
+
+/// Mount a FUSE filesystem at `mountpoint` reflecting `signed`.
 ///
-/// Blocks until unmounted. Mount options: RO, FSName("taproot").
-pub fn mount_readonly(mountpoint: &Path, signed: &SignedState) -> Result<(), TaprootError> {
+/// Blocks until unmounted. Read-only everywhere except the `env` file;
+/// edits to `env` are returned as drift in the outcome.
+pub fn mount_readonly(
+    mountpoint: &Path,
+    signed: &SignedState,
+) -> Result<MountOutcome, TaprootError> {
     let meta = std::fs::symlink_metadata(mountpoint).map_err(|e| {
         TaprootError::Mount(format!(
             "mountpoint does not exist: {}: {e}",
@@ -530,13 +708,43 @@ pub fn mount_readonly(mountpoint: &Path, signed: &SignedState) -> Result<(), Tap
         )));
     }
     let fs = TaprootFS::new(signed);
+    let journal = Arc::clone(&fs.journal);
     let options = [
-        fuser::MountOption::RO,
         fuser::MountOption::FSName("taproot".to_string()),
         fuser::MountOption::Subtype("taproot".to_string()),
     ];
     fuser::mount2(fs, mountpoint, &options).map_err(|e| TaprootError::Mount(e.to_string()))?;
-    Ok(())
+
+    let j = journal.lock().unwrap();
+    Ok(outcome_from_journal(&j, signed))
+}
+
+/// Decide the mount outcome from the journal. Extracted from
+/// `mount_readonly` so the drift/raw-env branches are testable without a
+/// real mount.
+fn outcome_from_journal(j: &Journal, signed: &SignedState) -> MountOutcome {
+    if j.drifted() {
+        match extract_env_drift(signed, &j.env_data) {
+            Ok(drift) => MountOutcome {
+                drift: Some(drift),
+                raw_env: None,
+                parse_error: None,
+            },
+            // Unparseable env must not destroy the session: hand back the
+            // raw bytes so the CLI can persist them.
+            Err(e) => MountOutcome {
+                drift: None,
+                raw_env: Some(j.env_data.clone()),
+                parse_error: Some(e),
+            },
+        }
+    } else {
+        MountOutcome {
+            drift: None,
+            raw_env: None,
+            parse_error: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +814,102 @@ mod tests {
         let attr = fs.getattr_for(ROOT_INO).unwrap();
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o555);
+    }
+
+    #[test]
+    fn env_is_writable_others_are_not() {
+        let signed = sample_signed();
+        let mut fs = TaprootFS::new(&signed);
+        let env_ino = fs.lookup_ino(ROOT_INO, "env").unwrap();
+        let state_ino = fs.lookup_ino(ROOT_INO, "state.json").unwrap();
+
+        assert_eq!(fs.getattr_for(env_ino).unwrap().perm, 0o644);
+        assert_eq!(fs.getattr_for(state_ino).unwrap().perm, 0o444);
+
+        // env accepts writes
+        let n = fs.apply_write(env_ino, 0, b"FOO=baz\n").unwrap();
+        assert_eq!(n, 8);
+        // state.json rejects writes
+        assert_eq!(fs.apply_write(state_ino, 0, b"x"), Err(EROFS));
+    }
+
+    #[test]
+    fn env_write_updates_journal_and_drift_extracts() {
+        let signed = sample_signed();
+        let mut fs = TaprootFS::new(&signed);
+        let env_ino = fs.lookup_ino(ROOT_INO, "env").unwrap();
+
+        // rewrite whole file via truncate + write
+        fs.apply_truncate(env_ino, 0).unwrap();
+        fs.apply_write(env_ino, 0, b"FOO=baz\nNEW=1\n").unwrap();
+
+        {
+            let j = fs.journal.lock().unwrap();
+            assert!(j.drifted());
+            let drift = extract_env_drift(&signed, &j.env_data).unwrap();
+            assert_eq!(drift.state.env_vars.get("FOO").unwrap(), "baz");
+            assert_eq!(drift.state.env_vars.get("NEW").unwrap(), "1");
+            assert!(drift.signature.is_none());
+            assert_ne!(drift.hash, signed.hash);
+            // untouched fields survive
+            assert_eq!(drift.state.runtimes, signed.state.runtimes);
+        }
+    }
+
+    #[test]
+    fn identical_env_rewrite_is_not_drift() {
+        let signed = sample_signed();
+        let mut fs = TaprootFS::new(&signed);
+        let env_ino = fs.lookup_ino(ROOT_INO, "env").unwrap();
+        // rewrite the exact original content
+        let original: Vec<u8> = fs
+            .get_inode(env_ino)
+            .map(|i| i.data.clone())
+            .unwrap_or_default();
+        fs.apply_truncate(env_ino, 0).unwrap();
+        fs.apply_write(env_ino, 0, &original).unwrap();
+        assert!(!fs.journal.lock().unwrap().drifted());
+    }
+
+    #[test]
+    fn parse_env_rejects_malformed_lines() {
+        assert!(parse_env("A=1\nB=2\n").is_ok());
+        assert!(parse_env("\n\nA=1\n").is_ok());
+        assert!(parse_env("=1\n").is_err());
+        assert!(parse_env("JUSTKEY\n").is_err());
+        // value may contain '='
+        let m = parse_env("URL=http://x?a=b\n").unwrap();
+        assert_eq!(m.get("URL").unwrap(), "http://x?a=b");
+    }
+
+    #[test]
+    fn outcome_preserves_unparseable_env_as_raw_bytes() {
+        let signed = sample_signed();
+        let mut fs = TaprootFS::new(&signed);
+        let env_ino = fs.lookup_ino(ROOT_INO, "env").unwrap();
+        // binary garbage with no newline and no '='
+        fs.apply_truncate(env_ino, 0).unwrap();
+        fs.apply_write(env_ino, 0, &[0xFF, 0xFE, 0x00, 0x01])
+            .unwrap();
+
+        let j = fs.journal.lock().unwrap();
+        let outcome = outcome_from_journal(&j, &signed);
+        assert!(outcome.drift.is_none());
+        assert!(outcome.raw_env.is_some());
+        assert!(outcome.parse_error.is_some());
+        assert_eq!(
+            outcome.raw_env.as_deref().unwrap(),
+            &[0xFF, 0xFE, 0x00, 0x01]
+        );
+
+        // clean journal → no drift, no raw
+        drop(j);
+        let fs2 = TaprootFS::new(&signed);
+        let j2 = fs2.journal.lock().unwrap();
+        let outcome2 = outcome_from_journal(&j2, &signed);
+        assert!(outcome2.drift.is_none());
+        assert!(outcome2.raw_env.is_none());
+        assert!(outcome2.parse_error.is_none());
     }
 
     #[test]
