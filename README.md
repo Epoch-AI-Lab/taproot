@@ -43,10 +43,11 @@ If the state has drifted from the signed baseline, Taproot blocks execution and 
 
 We are building the wedge primitive:
 - [x] State serialization engine (Rust)
-- [ ] FUSE mount CLI
-- [ ] GitHub Action + baseline check
-- [ ] Signed state registry
-- [ ] Managed fabric + registry API
+- [x] FUSE mount CLI (read-only, v0.0.1)
+- [x] GitHub Action + baseline check (`taproot check` strict, composite action)
+- [x] Signed state registry (local content-addressed, `taproot registry push/pull/list`)
+- [x] Key management (`taproot keys generate/list/rotate`)
+- [x] Managed fabric + registry API (`taproot serve`, `taproot remote`, `taproot fabric` audit/policy/tokens)
 
 ## Open source
 
@@ -58,7 +59,19 @@ Taproot's mount CLI, protocol format, and state schema are MIT-licensed. The man
 git clone https://github.com/Epoch-AI-Lab/taproot.git
 cd taproot
 cargo build --release
-./target/release/taproot mount ~/projects/myapp
+./target/release/taproot keys generate --id mykey
+./target/release/taproot init --repo myapp --branch main --commit 9f3a2c1
+./target/release/taproot registry push
+./target/release/taproot registry list --repo myapp
+./target/release/taproot mount --no-fuse ~/projects/myapp   # requires existing dir; omit --no-fuse for real FUSE
+./target/release/taproot status
+./target/release/taproot verify
+./target/release/taproot check --baseline .taproot/baseline.json --json  # strict drift check
+
+# remote fabric
+./target/release/taproot serve --addr 127.0.0.1:3000 &
+./target/release/taproot remote push --remote http://127.0.0.1:3000
+./target/release/taproot fabric audit
 ```
 
 ## Contribute

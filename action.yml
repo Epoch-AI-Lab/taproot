@@ -1,0 +1,72 @@
+name: "Taproot Baseline Check"
+description: "Verify .taproot/state.json integrity and check drift against baseline — strict by default"
+branding:
+  icon: "layers"
+  color: "gray-dark"
+
+inputs:
+  state-path:
+    description: "Path to current state file (PR head)"
+    default: ".taproot/state.json"
+    required: false
+  baseline-ref:
+    description: "Git ref to fetch baseline from (default: github.base_ref or main)"
+    default: ""
+    required: false
+  baseline-path:
+    description: "Path to state file in baseline branch (default: same as state-path)"
+    default: ""
+    required: false
+  fail-on-drift:
+    description: "Exit 1 if drift detected (breaking or strict warnings)"
+    default: "true"
+    required: false
+  working-directory:
+    description: "Working directory to run in"
+    default: "."
+    required: false
+  registry-url:
+    description: "Remote registry URL (e.g. https://registry.taproot.dev). If set, baseline is fetched via API first, fallback to git."
+    default: ""
+    required: false
+  registry-token:
+    description: "Bearer token for remote registry"
+    default: ""
+    required: false
+  registry-path:
+    description: "Local registry path (default: .taproot/registry)"
+    default: ".taproot/registry"
+    required: false
+
+outputs:
+  hash:
+    description: "sha256 hash of head state"
+    value: ${{ steps.check.outputs.hash }}
+  baseline-hash:
+    description: "sha256 hash of baseline state, empty if no baseline"
+    value: ${{ steps.check.outputs.baseline-hash }}
+  drift:
+    description: "'true' if drift detected, 'false' otherwise"
+    value: ${{ steps.check.outputs.drift }}
+  verified:
+    description: "'true' if head state passed hash+signature check"
+    value: ${{ steps.check.outputs.verified }}
+  baseline-exists:
+    description: "'true' if baseline state was found"
+    value: ${{ steps.check.outputs.baseline-exists }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: check
+      shell: bash
+      env:
+        INPUT_STATE_PATH: ${{ inputs.state-path }}
+        INPUT_BASELINE_REF: ${{ inputs.baseline-ref }}
+        INPUT_BASELINE_PATH: ${{ inputs.baseline-path }}
+        INPUT_FAIL_ON_DRIFT: ${{ inputs.fail-on-drift }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_REGISTRY_URL: ${{ inputs.registry-url }}
+        INPUT_REGISTRY_TOKEN: ${{ inputs.registry-token }}
+        INPUT_REGISTRY_PATH: ${{ inputs.registry-path }}
+      run: ${{ github.action_path }}/scripts/run.sh

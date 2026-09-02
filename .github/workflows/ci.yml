@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main, feat/*]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Verify binary works
+        run: |
+          ./target/debug/taproot --help
+          ./target/debug/taproot keys generate --id ci-test --keys /tmp/ci-keys
+          ./target/debug/taproot init --repo ci/test --branch main --commit ci123 --state-path /tmp/ci-state.json
+          ./target/debug/taproot verify --state-path /tmp/ci-state.json
+          ./target/debug/taproot registry push --state-path /tmp/ci-state.json --registry /tmp/ci-registry
+          ./target/debug/taproot registry list --registry /tmp/ci-registry ci/test
