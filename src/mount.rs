@@ -904,7 +904,7 @@ mod tests {
 
         // clean journal → no drift, no raw
         drop(j);
-        let mut fs2 = TaprootFS::new(&signed);
+        let fs2 = TaprootFS::new(&signed);
         let j2 = fs2.journal.lock().unwrap();
         let outcome2 = outcome_from_journal(&j2, &signed);
         assert!(outcome2.drift.is_none());
