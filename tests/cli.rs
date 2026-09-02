@@ -312,6 +312,7 @@ fn sync_dry_run_reports_but_does_not_adopt() {
         state_path: Some(state_path.clone()),
         from: None,
         dry_run: true,
+        force: false,
         no_sign: true,
         keep: false,
     })
@@ -332,6 +333,7 @@ fn sync_adopts_drift_and_resigns() {
         state_path: Some(state_path.clone()),
         from: None,
         dry_run: false,
+        force: false,
         no_sign: true,
         keep: false,
     })
@@ -358,6 +360,7 @@ fn sync_errors_without_drift_file() {
         state_path: Some(state_path),
         from: None,
         dry_run: false,
+        force: false,
         no_sign: true,
         keep: false,
     })
@@ -375,9 +378,122 @@ fn sync_identical_states_cleans_up_drift_file() {
         state_path: Some(state_path),
         from: None,
         dry_run: false,
+        force: false,
         no_sign: true,
         keep: false,
     })
     .is_ok());
     assert!(!drift_path.exists());
+}
+
+#[test]
+fn sync_refuses_from_pointing_at_state_file() {
+    let (_dir, state_path, _drift_path) = sync_setup();
+    let before = taproot::StateEngine::load(&state_path).unwrap().hash;
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: Some(state_path.clone()),
+        dry_run: false,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_err());
+    // baseline must survive untouched
+    let after = taproot::StateEngine::load(&state_path).unwrap().hash;
+    assert_eq!(before, after);
+}
+
+#[test]
+fn sync_refuses_identity_drift_without_force() {
+    use taproot::{StateEngine, TaprootState};
+    let (_dir, state_path, drift_path) = sync_setup();
+    // drift for a DIFFERENT repo — self-consistent, but foreign
+    let state = TaprootState::new("otherapp", "main", "abc123").with_env("FOO", "bar");
+    let hash = StateEngine::hash(&state).unwrap();
+    taproot::StateEngine::save(
+        &drift_path,
+        &taproot::SignedState {
+            state,
+            hash,
+            signature: None,
+            public_key: None,
+        },
+    )
+    .unwrap();
+
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        dry_run: false,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_err());
+    // --force opts in
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        dry_run: false,
+        force: true,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok());
+    let adopted = taproot::StateEngine::load(&state_path).unwrap();
+    assert_eq!(adopted.state.base.repo, "otherapp");
+}
+
+#[test]
+fn sign_state_with_keys_uses_stored_key() {
+    use taproot::cli::sign_state_with_keys;
+    use taproot::keys::KeyStore;
+    let dir = temp_dir();
+    let keys_root = dir.path().join("keys");
+    KeyStore::init(&keys_root).unwrap();
+    let kp = KeyStore::new(&keys_root).generate(None).unwrap();
+
+    let state = taproot::TaprootState::new("myapp", "main", "abc123");
+    let signed = sign_state_with_keys(state, false, &keys_root).unwrap();
+    assert!(signed.signature.is_some());
+    assert_eq!(signed.public_key.as_deref(), Some(kp.public_key.as_str()));
+    taproot::StateEngine::verify(&signed).unwrap();
+}
+
+#[test]
+fn sign_state_with_keys_ephemeral_and_no_sign() {
+    use taproot::cli::sign_state_with_keys;
+    let dir = temp_dir();
+    let keys_root = dir.path().join("no-keys-here");
+
+    let state = taproot::TaprootState::new("myapp", "main", "abc123");
+    // no keystore on disk → ephemeral, still a valid signed state
+    let signed = sign_state_with_keys(state.clone(), false, &keys_root).unwrap();
+    assert!(signed.signature.is_some());
+    assert!(signed.public_key.is_some());
+    taproot::StateEngine::verify(&signed).unwrap();
+
+    // --no-sign → hash only
+    let unsigned = sign_state_with_keys(state, true, &keys_root).unwrap();
+    assert!(unsigned.signature.is_none());
+    taproot::StateEngine::verify(&unsigned).unwrap();
+}
+
+#[test]
+fn extract_env_drift_rejects_non_utf8() {
+    use taproot::mount::extract_env_drift;
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+    let baseline = taproot::StateEngine::load(&state_path).unwrap();
+    let raw = [0xFFu8, 0xFE, b'A', b'=', b'1'];
+    assert!(extract_env_drift(&baseline, &raw).is_err());
 }

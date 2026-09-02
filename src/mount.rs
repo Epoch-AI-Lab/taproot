@@ -323,7 +323,7 @@ impl TaprootFS {
             inode.data.resize(end, 0);
         }
         inode.data[off..end].copy_from_slice(data);
-        {
+        if self.env_ino == Some(ino) {
             let mut j = self.journal.lock().unwrap();
             j.env_data = inode.data.clone();
         }
@@ -340,8 +340,10 @@ impl TaprootFS {
             return Err(EROFS);
         }
         inode.data.resize(size as usize, 0);
-        let mut j = self.journal.lock().unwrap();
-        j.env_data = inode.data.clone();
+        if self.env_ino == Some(ino) {
+            let mut j = self.journal.lock().unwrap();
+            j.env_data = inode.data.clone();
+        }
         Ok(())
     }
 }
@@ -669,8 +671,14 @@ pub fn extract_env_drift(
 /// Result of a mount session after unmount.
 #[derive(Debug)]
 pub struct MountOutcome {
-    /// Present when the env file was edited during the mount.
+    /// Present when the env file was edited and parsed back into a state.
     pub drift: Option<SignedState>,
+    /// Raw edited env bytes, present when parsing into a state failed.
+    /// The session's edits survive in these bytes even though no state
+    /// could be built from them.
+    pub raw_env: Option<Vec<u8>>,
+    /// Parse error accompanying `raw_env`.
+    pub parse_error: Option<TaprootError>,
 }
 
 /// Mount a FUSE filesystem at `mountpoint` reflecting `signed`.
@@ -709,10 +717,26 @@ pub fn mount_readonly(
 
     let j = journal.lock().unwrap();
     if j.drifted() {
-        let drift = extract_env_drift(signed, &j.env_data)?;
-        Ok(MountOutcome { drift: Some(drift) })
+        match extract_env_drift(signed, &j.env_data) {
+            Ok(drift) => Ok(MountOutcome {
+                drift: Some(drift),
+                raw_env: None,
+                parse_error: None,
+            }),
+            // Unparseable env must not destroy the session: hand back the
+            // raw bytes so the CLI can persist them.
+            Err(e) => Ok(MountOutcome {
+                drift: None,
+                raw_env: Some(j.env_data.clone()),
+                parse_error: Some(e),
+            }),
+        }
     } else {
-        Ok(MountOutcome { drift: None })
+        Ok(MountOutcome {
+            drift: None,
+            raw_env: None,
+            parse_error: None,
+        })
     }
 }
 
