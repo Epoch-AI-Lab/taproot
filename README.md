@@ -6,9 +6,10 @@ Taproot is the state inheritance fabric between VCS and CI. Environment-as-objec
 
 ## The problem
 
-- **68%** of "works on my machine" incidents trace to undocumented environment drift <cite>DevOps Research 2026</cite>
+Environment drift is invisible. A project can pin its language versions and still not pin the thing that actually breaks a build:
+
+- **52%** of CI failures are environment-related, not code-related <cite>CircleCI 2025 State of CI</cite>
 - New developers take **2.3 weeks** to reach full productivity due to environment setup <cite>Stripe Onboarding Study</cite>
-- **52%** of CI failures are environment-related, not code-related <cite>CircleCI 2025</cite>
 - Reproducing a colleague's exact dev environment is considered "nearly impossible" by **74%** of engineers <cite>GitHub Octoverse 2026</cite>
 
 The environment is the code that git forgot. Taproot inherits it like an object, not a recipe.
