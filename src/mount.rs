@@ -94,6 +94,101 @@ fn is_safe_filename(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Plain-directory materialization
+// ---------------------------------------------------------------------------
+
+/// Write the mounted file tree into a real directory instead of a FUSE mount.
+///
+/// Same layout the kernel mount serves: `README.taproot`, `state.json`, `env`,
+/// `hash`, `version`, plus `runtimes/` and `containers/`. Everything but `env`
+/// is written read-only. `env` is left writable and its original bytes are
+/// recorded so `capture_drift_from_dir` can diff it later.
+///
+/// This exists so the drift loop is reachable without `/dev/fuse`. Containers
+/// and CI runners have no FUSE, and a feature you cannot exercise is a feature
+/// you cannot ship.
+pub fn materialize_tree(mountpoint: &Path, signed: &SignedState) -> Result<(), TaprootError> {
+    let fs = TaprootFS::new(signed);
+    materialize_inode_tree(&fs, mountpoint)?;
+    Ok(())
+}
+
+/// Walk the same inode table the FUSE layer serves, writing each node out.
+fn materialize_inode_tree(fs: &TaprootFS, mountpoint: &Path) -> Result<(), TaprootError> {
+    let root = fs
+        .inodes
+        .get(&ROOT_INO)
+        .ok_or_else(|| TaprootError::Mount("missing root inode".into()))?;
+    write_dir(fs, root, mountpoint)
+}
+
+fn write_dir(fs: &TaprootFS, inode: &Inode, dir: &Path) -> Result<(), TaprootError> {
+    std::fs::create_dir_all(dir)?;
+    for child_ino in &inode.children {
+        let Some(child) = fs.inodes.get(child_ino) else {
+            continue;
+        };
+        let path = dir.join(&child.name);
+        // Only regular files and directories are ever built into the table;
+        // devices and pipes are skipped rather than materialized.
+        match child.kind {
+            FileType::Directory => write_dir(fs, child, &path)?,
+            FileType::RegularFile => {
+                std::fs::write(&path, &child.data)?;
+                if child.writable {
+                    make_writable(&path);
+                } else {
+                    make_read_only(&path);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_read_only(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    // 0o444. The tree is disposable state materialization, not user data.
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444));
+}
+
+/// `env` is the one writable file. `fs::write` inherits the process umask, which
+/// can leave it owner-only, so the mode is set explicitly rather than assumed.
+#[cfg(unix)]
+fn make_writable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+}
+
+#[cfg(not(unix))]
+fn make_read_only(_path: &Path) {}
+
+#[cfg(not(unix))]
+fn make_writable(_path: &Path) {}
+
+/// Diff a materialized `env` file against the signed baseline and return the
+/// drift a FUSE unmount would have produced. Returns `None` when `env` is
+/// unchanged or missing, so an untouched tree is not reported as drift.
+pub fn capture_drift_from_dir(
+    mountpoint: &Path,
+    signed: &SignedState,
+) -> Result<Option<crate::state::SignedState>, TaprootError> {
+    let env_path = mountpoint.join("env");
+    if !env_path.exists() {
+        return Ok(None);
+    }
+    let edited = std::fs::read(&env_path)?;
+    let original = TaprootFS::env_content(signed).into_bytes();
+    if edited == original {
+        return Ok(None);
+    }
+    let drift = extract_env_drift(signed, &edited)?;
+    Ok(Some(drift))
+}
+
+// ---------------------------------------------------------------------------
 // TaprootFS
 // ---------------------------------------------------------------------------
 

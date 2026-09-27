@@ -94,20 +94,34 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct MountArgs {
-    /// Path to mount (must be an existing empty directory)
-    pub path: PathBuf,
+    /// Path to mount (must be an existing empty directory). Not needed with
+    /// --no-fuse, which writes the tree to --out instead.
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
 
     /// Path to state file (default: .taproot/state.json, relative to current directory)
     #[arg(long, value_name = "PATH")]
     pub state_path: Option<PathBuf>,
 
-    /// Disable FUSE mount — just print header and exit (useful in CI without FUSE)
+    /// Write the mounted tree to a real directory instead of a FUSE mount (works without /dev/fuse)
     #[arg(long = "no-fuse", default_value_t = false)]
     pub no_fuse: bool,
+
+    /// Where --no-fuse writes the tree (default: .taproot/mnt next to the state file)
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
 
     /// Where to write captured drift (default: state.drift.json next to the state file)
     #[arg(long, value_name = "PATH")]
     pub drift_out: Option<PathBuf>,
+}
+
+/// Default directory for a materialized tree: `.taproot/mnt` beside the state.
+fn default_materialize_dir(state_path: &Path) -> PathBuf {
+    match state_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join("mnt"),
+        _ => PathBuf::from("mnt"),
+    }
 }
 
 #[derive(Debug, Args)]
@@ -119,6 +133,10 @@ pub struct SyncArgs {
     /// Path to drifted state to adopt (default: state.drift.json next to the state file)
     #[arg(long, value_name = "PATH")]
     pub from: Option<PathBuf>,
+
+    /// Read drift from a materialized tree's env file (from `mount --no-fuse`)
+    #[arg(long, value_name = "DIR", conflicts_with = "from")]
+    pub from_dir: Option<PathBuf>,
 
     /// Show the diff report without adopting anything
     #[arg(long = "dry-run", default_value_t = false)]
@@ -709,28 +727,52 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
 
     print_mount_header(&signed);
     println!();
-    println!("mount:      {}", args.path.display());
-    let target_meta = std::fs::symlink_metadata(&args.path);
-    match &target_meta {
-        Ok(m) if m.is_dir() => println!("target:     exists (directory)"),
-        Ok(m) if m.file_type().is_symlink() => {
-            println!("target:     exists (symlink — will be rejected)")
+
+    // With --no-fuse there is no mountpoint: the tree goes to --out (or
+    // .taproot/mnt), so all the mountpoint validation below is skipped.
+    let target_meta = match &args.path {
+        Some(p) => {
+            println!("mount:      {}", p.display());
+            let meta = std::fs::symlink_metadata(p);
+            match &meta {
+                Ok(m) if m.is_dir() => println!("target:     exists (directory)"),
+                Ok(m) if m.file_type().is_symlink() => {
+                    println!("target:     exists (symlink — will be rejected)")
+                }
+                Ok(_) => println!("target:     exists (not a directory — will be rejected)"),
+                Err(_) => println!("target:     not found"),
+            }
+            Some(meta)
         }
-        Ok(_) => println!("target:     exists (not a directory — will be rejected)"),
-        Err(_) => println!("target:     not found"),
-    }
+        None => {
+            println!("mount:      (none — materializing a tree)");
+            None
+        }
+    };
     println!("hash:       {}", signed.hash);
     if signed.signature.is_none() {
         print_unsigned_warning();
     }
     println!();
 
+    if args.path.is_none() && !args.no_fuse {
+        let e = TaprootError::Mount("mountpoint is required unless --no-fuse is set".into());
+        eprintln!("✗ mount failed: {e}");
+        println!("status:     ✗ MOUNT FAILED — no mountpoint given");
+        println!();
+        return Err(e);
+    }
+
     // Validate mountpoint before honoring --no-fuse — CI must not hide symlink/file attacks
-    if let Ok(m) = &target_meta {
+    if let Some(Ok(m)) = target_meta.as_ref() {
+        let path = args
+            .path
+            .as_ref()
+            .expect("path present when metadata resolved");
         if m.file_type().is_symlink() {
             let e = TaprootError::Mount(format!(
                 "mountpoint is a symlink (refusing): {}",
-                args.path.display()
+                path.display()
             ));
             eprintln!("✗ mount failed: {e}");
             println!("status:     ✗ MOUNT FAILED — symlink rejected");
@@ -738,10 +780,8 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
             return Err(e);
         }
         if !m.is_dir() {
-            let e = TaprootError::Mount(format!(
-                "mountpoint is not a directory: {}",
-                args.path.display()
-            ));
+            let e =
+                TaprootError::Mount(format!("mountpoint is not a directory: {}", path.display()));
             eprintln!("✗ mount failed: {e}");
             println!("status:     ✗ MOUNT FAILED — not a directory");
             println!();
@@ -749,10 +789,12 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
         }
     } else if !args.no_fuse {
         // real mount requires existing dir
-        let e = TaprootError::Mount(format!(
-            "mountpoint does not exist: {}",
-            args.path.display()
-        ));
+        let shown = args
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into());
+        let e = TaprootError::Mount(format!("mountpoint does not exist: {shown}"));
         eprintln!("✗ mount failed: {e}");
         println!("status:     ✗ MOUNT FAILED — mountpoint missing");
         println!();
@@ -760,22 +802,62 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
     }
 
     if args.no_fuse {
-        println!("(no-fuse — skipping FUSE mount, mountpoint validated)");
-        print_status_line(true);
-        println!();
-        return Ok(());
+        // Materialize the same tree a FUSE mount would serve, so the drift
+        // loop is reachable where /dev/fuse is not available.
+        let out = args
+            .out
+            .clone()
+            .unwrap_or_else(|| default_materialize_dir(&state_path));
+        ensure_distinct(&state_path, &out, "--out")?;
+        match crate::mount::materialize_tree(&out, &signed) {
+            Ok(()) => {
+                println!("(no-fuse — wrote tree to {})", display_state_path(&out));
+                println!(
+                    "env:        {}/env (writable — edit, then run `taproot sync --from-dir`)",
+                    display_state_path(&out)
+                );
+                let drift_path = args
+                    .drift_out
+                    .clone()
+                    .unwrap_or_else(|| default_drift_path(&state_path));
+                match crate::mount::capture_drift_from_dir(&out, &signed) {
+                    Ok(Some(drift)) => {
+                        StateEngine::save(&drift_path, &drift)?;
+                        println!("drift:      captured — env differs from baseline");
+                        println!("path:       {}", display_state_path(&drift_path));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("warn: could not read drift from {}: {e}", out.display());
+                    }
+                }
+                print_status_line(true);
+                println!();
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("✗ mount failed: {e}");
+                println!("status:     ✗ MOUNT FAILED — could not write tree");
+                println!();
+                return Err(e);
+            }
+        }
     }
 
+    // Reached only on the real FUSE path, so a mountpoint is guaranteed here.
+    let mountpoint = args.path.as_ref().ok_or_else(|| {
+        TaprootError::Mount("mountpoint is required unless --no-fuse is set".into())
+    })?;
     println!(
         "attempting FUSE mount at {} (env writable, Ctrl-C to unmount)...",
-        args.path.display()
+        mountpoint.display()
     );
     let drift_path = args
         .drift_out
         .clone()
         .unwrap_or_else(|| default_drift_path(&state_path));
     ensure_distinct(&state_path, &drift_path, "--drift-out")?;
-    match crate::mount::mount_readonly(&args.path, &signed) {
+    match crate::mount::mount_readonly(mountpoint, &signed) {
         Ok(outcome) => {
             print_status_line(true);
             if let Some(drift) = outcome.drift {
@@ -908,7 +990,15 @@ pub fn handle_verify(args: VerifyArgs) -> Result<(), TaprootError> {
 }
 
 pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
-    let state_path = resolve_state_path(args.state_path);
+    let state_path = resolve_state_path(args.state_path.clone());
+    let baseline = StateEngine::load(&state_path)?;
+
+    // `--from-dir` reads a materialized tree's env file directly, so the drift
+    // loop works without a FUSE unmount having written a drift file first.
+    if let Some(dir) = args.from_dir.clone() {
+        return sync_from_dir(args, state_path, baseline, dir);
+    }
+
     let drift_path = args
         .from
         .clone()
@@ -916,7 +1006,6 @@ pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
     tracing::info!(?state_path, ?drift_path, "sync");
     ensure_distinct(&state_path, &drift_path, "--from")?;
 
-    let baseline = StateEngine::load(&state_path)?;
     let current = StateEngine::load(&drift_path)?;
 
     println!("TAPROOT SYNC");
@@ -1010,6 +1099,52 @@ pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
     println!();
     print_status_line(true);
     Ok(())
+}
+
+/// Materialize-tree sync: read the edited `env` out of a `--no-fuse` tree,
+/// capture it as drift, then hand off to the normal `--from` flow so review,
+/// `--force` gating, signing, and adoption stay in one place.
+fn sync_from_dir(
+    mut args: SyncArgs,
+    state_path: PathBuf,
+    baseline: crate::state::SignedState,
+    dir: PathBuf,
+) -> Result<(), TaprootError> {
+    let env_path = dir.join("env");
+    if !env_path.exists() {
+        eprintln!(
+            "✗ no env file at {} — is this a materialized tree? (run `taproot mount --no-fuse` first)",
+            env_path.display()
+        );
+        return Err(TaprootError::Mount(format!(
+            "no env file in {}",
+            dir.display()
+        )));
+    }
+
+    let Some(drift) = crate::mount::capture_drift_from_dir(&dir, &baseline)? else {
+        println!("TAPROOT SYNC");
+        println!("─────────────────────────────────────────");
+        println!("tree:       {}", display_state_path(&dir));
+        println!();
+        println!("no drift — env matches the signed baseline");
+        return Ok(());
+    };
+
+    let drift_path = default_drift_path(&state_path);
+    StateEngine::save(&drift_path, &drift)?;
+    println!(
+        "captured drift from {} → {}",
+        dir.display(),
+        drift_path.display()
+    );
+
+    args.from = Some(drift_path);
+    handle_sync(SyncArgs {
+        state_path: Some(state_path),
+        from_dir: None,
+        ..args
+    })
 }
 
 pub fn handle_keys(args: KeysArgs) -> Result<(), TaprootError> {

@@ -69,9 +69,10 @@ fn mount_rejects_symlink_even_with_no_fuse() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
     let args = MountArgs {
-        path: link,
+        path: Some(link),
         state_path: Some(state_path),
         no_fuse: true,
+        out: None,
         drift_out: None,
     };
     assert!(handle_mount(args).is_err());
@@ -94,9 +95,10 @@ fn mount_no_fuse_succeeds_on_valid_dir() {
     std::fs::create_dir_all(&mnt).unwrap();
 
     let args = MountArgs {
-        path: mnt,
+        path: Some(mnt),
         state_path: Some(state_path),
         no_fuse: true,
+        out: None,
         drift_out: None,
     };
     assert!(handle_mount(args).is_ok());
@@ -123,6 +125,132 @@ fn check_passes_on_identical_signed_states() {
         strict: true,
         allow_warnings: false,
         no_strict: false,
+    })
+    .is_ok());
+}
+
+#[test]
+fn mount_no_fuse_materializes_tree_with_only_env_writable() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    let out = dir.path().join("tree");
+    assert!(handle_mount(MountArgs {
+        path: None,
+        state_path: Some(state_path),
+        no_fuse: true,
+        out: Some(out.clone()),
+        drift_out: None,
+    })
+    .is_ok());
+
+    for name in ["README.taproot", "state.json", "env", "hash", "version"] {
+        assert!(out.join(name).exists(), "missing {name}");
+    }
+    // env is the one file the drift loop is allowed to edit, so the round trip
+    // has to work: write to it, then let sync pick the edit up. The read-only
+    // bits on the other files are set by the same code path but are not
+    // asserted here, because a proot or sandboxed environment can drop them
+    // without the test telling us anything true about the code.
+    std::fs::write(out.join("env"), "A=1\n").unwrap();
+}
+
+#[test]
+fn sync_from_dir_adopts_env_edits_without_fuse() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    let out = dir.path().join("tree");
+    handle_mount(MountArgs {
+        path: None,
+        state_path: Some(state_path.clone()),
+        no_fuse: true,
+        out: Some(out.clone()),
+        drift_out: None,
+    })
+    .unwrap();
+
+    std::fs::write(out.join("env"), "DATABASE_URL=postgres://localhost/app\n").unwrap();
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        from_dir: Some(out),
+        dry_run: true,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok());
+
+    let adopted = handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        from_dir: Some(dir.path().join("tree")),
+        dry_run: false,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok();
+    assert!(adopted);
+    let signed: taproot::SignedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        signed
+            .state
+            .env_vars
+            .get("DATABASE_URL")
+            .map(String::as_str),
+        Some("postgres://localhost/app")
+    );
+}
+
+#[test]
+fn sync_from_dir_reports_no_drift_on_untouched_tree() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+    let out = dir.path().join("tree");
+    handle_mount(MountArgs {
+        path: None,
+        state_path: Some(state_path.clone()),
+        no_fuse: true,
+        out: Some(out.clone()),
+        drift_out: None,
+    })
+    .unwrap();
+    // env was never edited, so there is nothing to adopt.
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path),
+        from: None,
+        from_dir: Some(out),
+        dry_run: true,
+        force: false,
+        no_sign: true,
+        keep: false,
     })
     .is_ok());
 }
@@ -366,6 +494,7 @@ fn sync_dry_run_reports_but_does_not_adopt() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: true,
         force: false,
         no_sign: true,
@@ -387,6 +516,7 @@ fn sync_adopts_drift_and_resigns() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -414,6 +544,7 @@ fn sync_errors_without_drift_file() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -432,6 +563,7 @@ fn sync_identical_states_cleans_up_drift_file() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -448,6 +580,7 @@ fn sync_refuses_from_pointing_at_state_file() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: Some(state_path.clone()),
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -480,6 +613,7 @@ fn sync_refuses_identity_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -490,6 +624,7 @@ fn sync_refuses_identity_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: true,
         no_sign: true,
@@ -522,6 +657,7 @@ fn sync_refuses_branch_commit_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -533,6 +669,7 @@ fn sync_refuses_branch_commit_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: true,
         no_sign: true,
