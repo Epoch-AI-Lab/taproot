@@ -69,6 +69,7 @@ impl StateEngine {
             hash: hash_hex,
             signature: Some(B64.encode(signature.to_bytes())),
             public_key: Some(public_key_b64),
+            parent: None,
         })
     }
 
@@ -209,20 +210,27 @@ mod tests {
 
     #[test]
     fn verify_fails_on_wrong_key() {
+        // Sign with one key, then verify against a different public key. The
+        // signature will not check out, so verify must fail.
         let state = sample_state();
         let (priv_b64, _) = StateEngine::generate_keypair();
-        let (other_priv, _) = StateEngine::generate_keypair();
-        let mut signed = StateEngine::sign(&state, &priv_b64).unwrap();
-        // re-sign hash with wrong key but keep hash
-        let other_signed = StateEngine::sign(&state, &other_priv).unwrap();
-        signed.signature = other_signed.signature;
-        signed.public_key = other_signed.public_key;
-        // Now tamper one more way: sign with other key but verify should use that key — it will pass.
-        // So instead test: keep original signature, swap pubkey
-        let mut tampered = StateEngine::sign(&state, &priv_b64).unwrap();
         let (_, other_pub) = StateEngine::generate_keypair();
-        tampered.public_key = Some(other_pub);
-        assert!(StateEngine::verify(&tampered).is_err());
+        let mut signed = StateEngine::sign(&state, &priv_b64).unwrap();
+        signed.public_key = Some(other_pub);
+        assert!(matches!(
+            StateEngine::verify(&signed),
+            Err(TaprootError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_signature_without_public_key() {
+        // signature present, public_key absent: mismatched envelope, not a valid state.
+        let state = sample_state();
+        let (priv_b64, _) = StateEngine::generate_keypair();
+        let mut signed = StateEngine::sign(&state, &priv_b64).unwrap();
+        signed.public_key = None;
+        assert!(StateEngine::verify(&signed).is_err());
     }
 
     #[test]
