@@ -47,6 +47,8 @@ pub struct Cli {
 pub enum Commands {
     /// Initialise a new taproot state snapshot
     Init(InitArgs),
+    /// Scan a project for declared runtimes, containers, and env vars
+    Scan(ScanArgs),
     /// Mount a taproot state (env file writable; edits captured as drift)
     Mount(MountArgs),
     /// Show current state status
@@ -90,6 +92,29 @@ pub struct InitArgs {
     /// Skip signing (store hash only, no ed25519 signature)
     #[arg(long = "no-sign", default_value_t = false)]
     pub no_sign: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ScanArgs {
+    /// Project directory to scan (default: current directory)
+    #[arg(value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+
+    /// Print the findings as JSON instead of a table
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    /// Write the findings into the state file and sign it
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+
+    /// Path to state file to write with --apply (default: .taproot/state.json)
+    #[arg(long, value_name = "PATH")]
+    pub state_path: Option<PathBuf>,
+
+    /// Include env vars from .env files (skipped by default, they often hold secrets)
+    #[arg(long, default_value_t = false)]
+    pub include_env: bool,
 }
 
 #[derive(Debug, Args)]
@@ -539,6 +564,164 @@ fn print_unsigned_warning() {
 }
 // Handlers
 // ---------------------------------------------------------------------------
+
+pub fn handle_scan(args: ScanArgs) -> Result<(), TaprootError> {
+    let dir = args
+        .dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    if !dir.is_dir() {
+        return Err(TaprootError::Mount(format!(
+            "not a directory: {}",
+            dir.display()
+        )));
+    }
+
+    let result = crate::scan::scan_project(&dir);
+    let (env_vars, env_skipped) = if args.include_env {
+        crate::scan::scan_env_vars(&dir)
+    } else {
+        (Default::default(), Default::default())
+    };
+
+    if args.json {
+        let payload = serde_json::json!({
+            "runtimes": result.runtimes,
+            "containers": result.containers,
+            "env_vars": env_vars,
+            "env_skipped": env_skipped,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("TAPROOT SCAN");
+        println!("─────────────────────────────────────────");
+        println!("dir:        {}", dir.display());
+        println!();
+
+        if result.runtimes.is_empty() {
+            println!("runtimes:   none detected");
+            println!("            looked for .tool-versions, .mise.toml, Dockerfile, package.json");
+        } else {
+            println!("runtimes:   {}", result.runtimes.len());
+            for r in &result.runtimes {
+                println!("  {:<20} {} (pinned)", r.name, r.version);
+            }
+        }
+        println!();
+
+        if result.containers.is_empty() {
+            println!("containers: none detected");
+            println!("            looked for docker-compose.yml, compose.yml");
+        } else {
+            println!("containers: {}", result.containers.len());
+            for c in &result.containers {
+                println!("  {:<20} {} → {}", c.name, c.image, c.version);
+            }
+        }
+        println!();
+
+        if args.include_env {
+            if env_vars.is_empty() {
+                println!("env-vars:   none captured");
+            } else {
+                println!("env-vars:   {}", env_vars.len());
+                for (k, v) in &env_vars {
+                    println!("  {k}={v}");
+                }
+            }
+            if !env_skipped.is_empty() {
+                println!();
+                println!(
+                    "skipped {} value(s) that look like secrets:",
+                    env_skipped.len()
+                );
+                for (k, why) in &env_skipped {
+                    println!("  {k:<24} {why}");
+                }
+            }
+        } else {
+            println!("env-vars:   not read (pass --include-env to read .env files)");
+        }
+        println!();
+    }
+
+    if !args.apply {
+        return Ok(());
+    }
+
+    // --apply writes the findings into the state file, creating it when absent
+    // so `scan --apply` works before `init`.
+    let state_path = resolve_state_path(args.state_path);
+    let mut state = match StateEngine::load(&state_path) {
+        Ok(signed) => signed.state,
+        Err(_) => {
+            // `file_name()` is None for "." and for a bare root path, so
+            // canonicalize before naming the repo after the directory.
+            let named = dir
+                .canonicalize()
+                .ok()
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "unknown".to_string());
+            let (branch, commit) = git_head(&dir);
+            TaprootState::new(named, branch, commit)
+        }
+    };
+    state = result.apply_to(state);
+    if args.include_env {
+        state.env_vars.extend(env_vars);
+    }
+    state.created_at = chrono::Utc::now();
+
+    let keys_path = resolve_keys_path(None);
+    let priv_key = if keys_path.exists() {
+        crate::keys::KeyStore::init(&keys_path)
+            .and_then(|ks| ks.default_key())
+            .map(|kp| kp.private_key)
+            .unwrap_or_else(|_| StateEngine::generate_keypair().0)
+    } else {
+        StateEngine::generate_keypair().0
+    };
+    let signed = StateEngine::sign(&state, &priv_key)?;
+    if let Some(parent) = state_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    StateEngine::save(&state_path, &signed)?;
+    println!(
+        "applied:    sha256:{} → {}",
+        &signed.hash[..12],
+        display_state_path(&state_path)
+    );
+    Ok(())
+}
+
+/// Current branch and short commit for a directory, falling back to
+/// placeholders when git is unavailable or the directory is not a repo.
+fn git_head(dir: &Path) -> (String, String) {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|| "main".into());
+    let commit = run(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    (branch, commit)
+}
 
 pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
     validate_non_empty("repo", &args.repo)?;

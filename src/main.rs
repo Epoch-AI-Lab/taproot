@@ -1,7 +1,8 @@
 use clap::Parser;
 use taproot::cli::{
     handle_check, handle_fabric, handle_init, handle_keys, handle_mount, handle_registry,
-    handle_remote, handle_serve, handle_status, handle_sync, handle_verify, Cli, Commands,
+    handle_remote, handle_scan, handle_serve, handle_status, handle_sync, handle_verify, Cli,
+    Commands,
 };
 
 fn main() {
@@ -16,6 +17,7 @@ fn main() {
 
     let result = match cli.command {
         Commands::Init(args) => handle_init(args),
+        Commands::Scan(args) => handle_scan(args),
         Commands::Mount(args) => handle_mount(args),
         Commands::Status(args) => handle_status(args),
         Commands::Verify(args) => handle_verify(args),

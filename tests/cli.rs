@@ -1,6 +1,6 @@
 use taproot::cli::{
-    handle_check, handle_init, handle_mount, handle_status, handle_sync, handle_verify, CheckArgs,
-    InitArgs, MountArgs, SyncArgs,
+    handle_check, handle_init, handle_mount, handle_scan, handle_status, handle_sync, handle_verify,
+    CheckArgs, InitArgs, MountArgs, ScanArgs, SyncArgs,
 };
 
 fn temp_dir() -> tempfile::TempDir {
@@ -731,4 +731,104 @@ fn extract_env_drift_rejects_non_utf8() {
     let baseline = taproot::StateEngine::load(&state_path).unwrap();
     let raw = [0xFFu8, 0xFE, b'A', b'=', b'1'];
     assert!(extract_env_drift(&baseline, &raw).is_err());
+}
+
+#[test]
+fn scan_apply_writes_detected_environment_into_a_signed_state() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::write(root.join(".tool-versions"), "nodejs 20.5.0\npython 3.11.4\n").unwrap();
+    std::fs::write(
+        root.join("docker-compose.yml"),
+        "services:\n  db:\n    image: postgres:15.3\n",
+    )
+    .unwrap();
+    let state_path = root.join("state.json");
+
+    assert!(handle_scan(ScanArgs {
+        dir: Some(root.to_path_buf()),
+        json: false,
+        apply: true,
+        state_path: Some(state_path.clone()),
+        include_env: false,
+    })
+    .is_ok());
+
+    let signed: taproot::SignedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    // nodejs is canonicalized to node, so one tool is one runtime.
+    let runtimes: Vec<(&str, &str)> = signed
+        .state
+        .runtimes
+        .iter()
+        .map(|r| (r.name.as_str(), r.version.as_str()))
+        .collect();
+    assert_eq!(runtimes, vec![("node", "20.5.0"), ("python", "3.11.4")]);
+    assert_eq!(signed.state.containers.len(), 1);
+    assert_eq!(signed.state.containers[0].image, "postgres:15.3");
+    // Everything is signed, so the state verifies on its own.
+    assert!(taproot::StateEngine::verify(&signed).is_ok());
+}
+
+#[test]
+fn scan_never_writes_a_secret_into_the_state() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".env"),
+        "NODE_ENV=development\nSTRIPE_SECRET=sk_live_should_not_appear\nDB_PASSWORD=hunter2\n",
+    )
+    .unwrap();
+    let state_path = root.join("state.json");
+
+    handle_scan(ScanArgs {
+        dir: Some(root.to_path_buf()),
+        json: false,
+        apply: true,
+        state_path: Some(state_path.clone()),
+        include_env: true,
+    })
+    .unwrap();
+
+    let raw = std::fs::read_to_string(&state_path).unwrap();
+    assert!(!raw.contains("sk_live_should_not_appear"), "secret leaked into state");
+    assert!(!raw.contains("hunter2"), "password leaked into state");
+    let signed: taproot::SignedState = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        signed.state.env_vars.get("NODE_ENV").map(String::as_str),
+        Some("development")
+    );
+}
+
+#[test]
+fn scan_without_env_flag_ignores_dotenv() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::write(root.join(".env"), "TOKEN=abc123\n").unwrap();
+    let state_path = root.join("state.json");
+    handle_scan(ScanArgs {
+        dir: Some(root.to_path_buf()),
+        json: false,
+        apply: true,
+        state_path: Some(state_path.clone()),
+        include_env: false,
+    })
+    .unwrap();
+    let signed: taproot::SignedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert!(signed.state.env_vars.is_empty());
+}
+
+#[test]
+fn scan_on_project_with_nothing_declared_still_succeeds() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    assert!(handle_scan(ScanArgs {
+        dir: Some(dir.path().to_path_buf()),
+        json: true,
+        apply: false,
+        state_path: Some(state_path),
+        include_env: false,
+    })
+    .is_ok());
 }
