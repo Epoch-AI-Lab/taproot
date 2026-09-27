@@ -47,6 +47,8 @@ pub struct Cli {
 pub enum Commands {
     /// Initialise a new taproot state snapshot
     Init(InitArgs),
+    /// Scan a project for declared runtimes, containers, and env vars
+    Scan(ScanArgs),
     /// Mount a taproot state (env file writable; edits captured as drift)
     Mount(MountArgs),
     /// Show current state status
@@ -93,21 +95,58 @@ pub struct InitArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct ScanArgs {
+    /// Project directory to scan (default: current directory)
+    #[arg(value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+
+    /// Print the findings as JSON instead of a table
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    /// Write the findings into the state file and sign it
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+
+    /// Path to state file to write with --apply (default: .taproot/state.json)
+    #[arg(long, value_name = "PATH")]
+    pub state_path: Option<PathBuf>,
+
+    /// Include env vars from .env files (skipped by default, they often hold secrets)
+    #[arg(long, default_value_t = false)]
+    pub include_env: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct MountArgs {
-    /// Path to mount (must be an existing empty directory)
-    pub path: PathBuf,
+    /// Path to mount (must be an existing empty directory). Not needed with
+    /// --no-fuse, which writes the tree to --out instead.
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
 
     /// Path to state file (default: .taproot/state.json, relative to current directory)
     #[arg(long, value_name = "PATH")]
     pub state_path: Option<PathBuf>,
 
-    /// Disable FUSE mount — just print header and exit (useful in CI without FUSE)
+    /// Write the mounted tree to a real directory instead of a FUSE mount (works without /dev/fuse)
     #[arg(long = "no-fuse", default_value_t = false)]
     pub no_fuse: bool,
+
+    /// Where --no-fuse writes the tree (default: .taproot/mnt next to the state file)
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
 
     /// Where to write captured drift (default: state.drift.json next to the state file)
     #[arg(long, value_name = "PATH")]
     pub drift_out: Option<PathBuf>,
+}
+
+/// Default directory for a materialized tree: `.taproot/mnt` beside the state.
+fn default_materialize_dir(state_path: &Path) -> PathBuf {
+    match state_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join("mnt"),
+        _ => PathBuf::from("mnt"),
+    }
 }
 
 #[derive(Debug, Args)]
@@ -119,6 +158,10 @@ pub struct SyncArgs {
     /// Path to drifted state to adopt (default: state.drift.json next to the state file)
     #[arg(long, value_name = "PATH")]
     pub from: Option<PathBuf>,
+
+    /// Read drift from a materialized tree's env file (from `mount --no-fuse`)
+    #[arg(long, value_name = "DIR", conflicts_with = "from")]
+    pub from_dir: Option<PathBuf>,
 
     /// Show the diff report without adopting anything
     #[arg(long = "dry-run", default_value_t = false)]
@@ -522,6 +565,164 @@ fn print_unsigned_warning() {
 // Handlers
 // ---------------------------------------------------------------------------
 
+pub fn handle_scan(args: ScanArgs) -> Result<(), TaprootError> {
+    let dir = args
+        .dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    if !dir.is_dir() {
+        return Err(TaprootError::Mount(format!(
+            "not a directory: {}",
+            dir.display()
+        )));
+    }
+
+    let result = crate::scan::scan_project(&dir);
+    let (env_vars, env_skipped) = if args.include_env {
+        crate::scan::scan_env_vars(&dir)
+    } else {
+        (Default::default(), Default::default())
+    };
+
+    if args.json {
+        let payload = serde_json::json!({
+            "runtimes": result.runtimes,
+            "containers": result.containers,
+            "env_vars": env_vars,
+            "env_skipped": env_skipped,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("TAPROOT SCAN");
+        println!("─────────────────────────────────────────");
+        println!("dir:        {}", dir.display());
+        println!();
+
+        if result.runtimes.is_empty() {
+            println!("runtimes:   none detected");
+            println!("            looked for .tool-versions, .mise.toml, Dockerfile, package.json");
+        } else {
+            println!("runtimes:   {}", result.runtimes.len());
+            for r in &result.runtimes {
+                println!("  {:<20} {} (pinned)", r.name, r.version);
+            }
+        }
+        println!();
+
+        if result.containers.is_empty() {
+            println!("containers: none detected");
+            println!("            looked for docker-compose.yml, compose.yml");
+        } else {
+            println!("containers: {}", result.containers.len());
+            for c in &result.containers {
+                println!("  {:<20} {} → {}", c.name, c.image, c.version);
+            }
+        }
+        println!();
+
+        if args.include_env {
+            if env_vars.is_empty() {
+                println!("env-vars:   none captured");
+            } else {
+                println!("env-vars:   {}", env_vars.len());
+                for (k, v) in &env_vars {
+                    println!("  {k}={v}");
+                }
+            }
+            if !env_skipped.is_empty() {
+                println!();
+                println!(
+                    "skipped {} value(s) that look like secrets:",
+                    env_skipped.len()
+                );
+                for (k, why) in &env_skipped {
+                    println!("  {k:<24} {why}");
+                }
+            }
+        } else {
+            println!("env-vars:   not read (pass --include-env to read .env files)");
+        }
+        println!();
+    }
+
+    if !args.apply {
+        return Ok(());
+    }
+
+    // --apply writes the findings into the state file, creating it when absent
+    // so `scan --apply` works before `init`.
+    let state_path = resolve_state_path(args.state_path);
+    let mut state = match StateEngine::load(&state_path) {
+        Ok(signed) => signed.state,
+        Err(_) => {
+            // `file_name()` is None for "." and for a bare root path, so
+            // canonicalize before naming the repo after the directory.
+            let named = dir
+                .canonicalize()
+                .ok()
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "unknown".to_string());
+            let (branch, commit) = git_head(&dir);
+            TaprootState::new(named, branch, commit)
+        }
+    };
+    state = result.apply_to(state);
+    if args.include_env {
+        state.env_vars.extend(env_vars);
+    }
+    state.created_at = chrono::Utc::now();
+
+    let keys_path = resolve_keys_path(None);
+    let priv_key = if keys_path.exists() {
+        crate::keys::KeyStore::init(&keys_path)
+            .and_then(|ks| ks.default_key())
+            .map(|kp| kp.private_key)
+            .unwrap_or_else(|_| StateEngine::generate_keypair().0)
+    } else {
+        StateEngine::generate_keypair().0
+    };
+    let signed = StateEngine::sign(&state, &priv_key)?;
+    if let Some(parent) = state_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    StateEngine::save(&state_path, &signed)?;
+    println!(
+        "applied:    sha256:{} → {}",
+        &signed.hash[..12],
+        display_state_path(&state_path)
+    );
+    Ok(())
+}
+
+/// Current branch and short commit for a directory, falling back to
+/// placeholders when git is unavailable or the directory is not a repo.
+fn git_head(dir: &Path) -> (String, String) {
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|| "main".into());
+    let commit = run(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    (branch, commit)
+}
+
 pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
     validate_non_empty("repo", &args.repo)?;
     validate_non_empty("branch", &args.branch)?;
@@ -539,6 +740,7 @@ pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         }
     } else {
         // Prefer stored keys if available, else generate ephemeral
@@ -632,7 +834,7 @@ fn ensure_distinct(a: &Path, b: &Path, what: &str) -> Result<(), TaprootError> {
         })
     };
     if resolve(a) == resolve(b) {
-        return Err(TaprootError::Mount(format!(
+        return Err(TaprootError::InvalidPaths(format!(
             "{what} points at the baseline state file itself ({}): refusing",
             display_state_path(b)
         )));
@@ -654,6 +856,7 @@ pub fn sign_state_with_keys(
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         });
     }
     if keys_path.exists() {
@@ -709,28 +912,52 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
 
     print_mount_header(&signed);
     println!();
-    println!("mount:      {}", args.path.display());
-    let target_meta = std::fs::symlink_metadata(&args.path);
-    match &target_meta {
-        Ok(m) if m.is_dir() => println!("target:     exists (directory)"),
-        Ok(m) if m.file_type().is_symlink() => {
-            println!("target:     exists (symlink — will be rejected)")
+
+    // With --no-fuse there is no mountpoint: the tree goes to --out (or
+    // .taproot/mnt), so all the mountpoint validation below is skipped.
+    let target_meta = match &args.path {
+        Some(p) => {
+            println!("mount:      {}", p.display());
+            let meta = std::fs::symlink_metadata(p);
+            match &meta {
+                Ok(m) if m.is_dir() => println!("target:     exists (directory)"),
+                Ok(m) if m.file_type().is_symlink() => {
+                    println!("target:     exists (symlink — will be rejected)")
+                }
+                Ok(_) => println!("target:     exists (not a directory — will be rejected)"),
+                Err(_) => println!("target:     not found"),
+            }
+            Some(meta)
         }
-        Ok(_) => println!("target:     exists (not a directory — will be rejected)"),
-        Err(_) => println!("target:     not found"),
-    }
+        None => {
+            println!("mount:      (none — materializing a tree)");
+            None
+        }
+    };
     println!("hash:       {}", signed.hash);
     if signed.signature.is_none() {
         print_unsigned_warning();
     }
     println!();
 
+    if args.path.is_none() && !args.no_fuse {
+        let e = TaprootError::Mount("mountpoint is required unless --no-fuse is set".into());
+        eprintln!("✗ mount failed: {e}");
+        println!("status:     ✗ MOUNT FAILED — no mountpoint given");
+        println!();
+        return Err(e);
+    }
+
     // Validate mountpoint before honoring --no-fuse — CI must not hide symlink/file attacks
-    if let Ok(m) = &target_meta {
+    if let Some(Ok(m)) = target_meta.as_ref() {
+        let path = args
+            .path
+            .as_ref()
+            .expect("path present when metadata resolved");
         if m.file_type().is_symlink() {
             let e = TaprootError::Mount(format!(
                 "mountpoint is a symlink (refusing): {}",
-                args.path.display()
+                path.display()
             ));
             eprintln!("✗ mount failed: {e}");
             println!("status:     ✗ MOUNT FAILED — symlink rejected");
@@ -738,10 +965,8 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
             return Err(e);
         }
         if !m.is_dir() {
-            let e = TaprootError::Mount(format!(
-                "mountpoint is not a directory: {}",
-                args.path.display()
-            ));
+            let e =
+                TaprootError::Mount(format!("mountpoint is not a directory: {}", path.display()));
             eprintln!("✗ mount failed: {e}");
             println!("status:     ✗ MOUNT FAILED — not a directory");
             println!();
@@ -749,10 +974,12 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
         }
     } else if !args.no_fuse {
         // real mount requires existing dir
-        let e = TaprootError::Mount(format!(
-            "mountpoint does not exist: {}",
-            args.path.display()
-        ));
+        let shown = args
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into());
+        let e = TaprootError::Mount(format!("mountpoint does not exist: {shown}"));
         eprintln!("✗ mount failed: {e}");
         println!("status:     ✗ MOUNT FAILED — mountpoint missing");
         println!();
@@ -760,22 +987,62 @@ pub fn handle_mount(args: MountArgs) -> Result<(), TaprootError> {
     }
 
     if args.no_fuse {
-        println!("(no-fuse — skipping FUSE mount, mountpoint validated)");
-        print_status_line(true);
-        println!();
-        return Ok(());
+        // Materialize the same tree a FUSE mount would serve, so the drift
+        // loop is reachable where /dev/fuse is not available.
+        let out = args
+            .out
+            .clone()
+            .unwrap_or_else(|| default_materialize_dir(&state_path));
+        ensure_distinct(&state_path, &out, "--out")?;
+        match crate::mount::materialize_tree(&out, &signed) {
+            Ok(()) => {
+                println!("(no-fuse — wrote tree to {})", display_state_path(&out));
+                println!(
+                    "env:        {}/env (writable — edit, then run `taproot sync --from-dir`)",
+                    display_state_path(&out)
+                );
+                let drift_path = args
+                    .drift_out
+                    .clone()
+                    .unwrap_or_else(|| default_drift_path(&state_path));
+                match crate::mount::capture_drift_from_dir(&out, &signed) {
+                    Ok(Some(drift)) => {
+                        StateEngine::save(&drift_path, &drift)?;
+                        println!("drift:      captured — env differs from baseline");
+                        println!("path:       {}", display_state_path(&drift_path));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("warn: could not read drift from {}: {e}", out.display());
+                    }
+                }
+                print_status_line(true);
+                println!();
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("✗ mount failed: {e}");
+                println!("status:     ✗ MOUNT FAILED — could not write tree");
+                println!();
+                return Err(e);
+            }
+        }
     }
 
+    // Reached only on the real FUSE path, so a mountpoint is guaranteed here.
+    let mountpoint = args.path.as_ref().ok_or_else(|| {
+        TaprootError::Mount("mountpoint is required unless --no-fuse is set".into())
+    })?;
     println!(
         "attempting FUSE mount at {} (env writable, Ctrl-C to unmount)...",
-        args.path.display()
+        mountpoint.display()
     );
     let drift_path = args
         .drift_out
         .clone()
         .unwrap_or_else(|| default_drift_path(&state_path));
     ensure_distinct(&state_path, &drift_path, "--drift-out")?;
-    match crate::mount::mount_readonly(&args.path, &signed) {
+    match crate::mount::mount_readonly(mountpoint, &signed) {
         Ok(outcome) => {
             print_status_line(true);
             if let Some(drift) = outcome.drift {
@@ -908,7 +1175,15 @@ pub fn handle_verify(args: VerifyArgs) -> Result<(), TaprootError> {
 }
 
 pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
-    let state_path = resolve_state_path(args.state_path);
+    let state_path = resolve_state_path(args.state_path.clone());
+    let baseline = StateEngine::load(&state_path)?;
+
+    // `--from-dir` reads a materialized tree's env file directly, so the drift
+    // loop works without a FUSE unmount having written a drift file first.
+    if let Some(dir) = args.from_dir.clone() {
+        return sync_from_dir(args, state_path, baseline, dir);
+    }
+
     let drift_path = args
         .from
         .clone()
@@ -916,7 +1191,6 @@ pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
     tracing::info!(?state_path, ?drift_path, "sync");
     ensure_distinct(&state_path, &drift_path, "--from")?;
 
-    let baseline = StateEngine::load(&state_path)?;
     let current = StateEngine::load(&drift_path)?;
 
     println!("TAPROOT SYNC");
@@ -1010,6 +1284,52 @@ pub fn handle_sync(args: SyncArgs) -> Result<(), TaprootError> {
     println!();
     print_status_line(true);
     Ok(())
+}
+
+/// Materialize-tree sync: read the edited `env` out of a `--no-fuse` tree,
+/// capture it as drift, then hand off to the normal `--from` flow so review,
+/// `--force` gating, signing, and adoption stay in one place.
+fn sync_from_dir(
+    mut args: SyncArgs,
+    state_path: PathBuf,
+    baseline: crate::state::SignedState,
+    dir: PathBuf,
+) -> Result<(), TaprootError> {
+    let env_path = dir.join("env");
+    if !env_path.exists() {
+        eprintln!(
+            "✗ no env file at {} — is this a materialized tree? (run `taproot mount --no-fuse` first)",
+            env_path.display()
+        );
+        return Err(TaprootError::Mount(format!(
+            "no env file in {}",
+            dir.display()
+        )));
+    }
+
+    let Some(drift) = crate::mount::capture_drift_from_dir(&dir, &baseline)? else {
+        println!("TAPROOT SYNC");
+        println!("─────────────────────────────────────────");
+        println!("tree:       {}", display_state_path(&dir));
+        println!();
+        println!("no drift — env matches the signed baseline");
+        return Ok(());
+    };
+
+    let drift_path = default_drift_path(&state_path);
+    StateEngine::save(&drift_path, &drift)?;
+    println!(
+        "captured drift from {} → {}",
+        dir.display(),
+        drift_path.display()
+    );
+
+    args.from = Some(drift_path);
+    handle_sync(SyncArgs {
+        state_path: Some(state_path),
+        from_dir: None,
+        ..args
+    })
 }
 
 pub fn handle_keys(args: KeysArgs) -> Result<(), TaprootError> {
@@ -1333,6 +1653,10 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     let baseline_path = args.baseline;
 
     tracing::info!(?state_path, ?baseline_path, "check");
+
+    // A baseline that is the state under test compares a file to itself and
+    // always reports no drift, which turns the gate into a no-op. Refuse it.
+    ensure_distinct(&baseline_path, &state_path, "--baseline")?;
 
     // Load and verify both files — strict: unsigned is error
     let current = StateEngine::load(&state_path).map_err(|e| {
@@ -1742,7 +2066,7 @@ pub fn handle_registry_log(args: RegistryLogArgs) -> Result<(), TaprootError> {
     if entries.is_empty() {
         println!("(no entries for {}/{})", args.repo, args.branch);
     } else {
-        for signed in &entries {
+        for (i, signed) in entries.iter().enumerate() {
             let short = if signed.hash.len() >= 12 {
                 &signed.hash[..12]
             } else {
@@ -1753,16 +2077,18 @@ pub fn handle_registry_log(args: RegistryLogArgs) -> Result<(), TaprootError> {
             } else {
                 "unsigned"
             };
+            // First entry is the current ref head; the rest are ancestors.
+            let marker = if i == 0 { "*" } else { " " };
             println!(
-                "* {}  {}@{}  {sig_label} · sha256:{short}",
-                signed.hash, signed.state.base.branch, signed.state.base.commit
+                "{marker} sha256:{short}  {}@{}  {sig_label}",
+                signed.state.base.branch, signed.state.base.commit
             );
             if let Some(notes) = &signed.state.notes {
-                println!("  notes: {notes}");
+                println!("    notes: {notes}");
             }
         }
         println!();
-        println!("{} entr(ies)", entries.len());
+        println!("{} entr(ies), newest first", entries.len());
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ pub mod fabric;
 pub mod keys;
 pub mod mount;
 pub mod registry;
+pub mod scan;
 pub mod server;
 pub mod state;
 pub(crate) mod util;

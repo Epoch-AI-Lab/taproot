@@ -1,0 +1,37 @@
+[
+ {
+  "cmd": "scan . --include-env --apply",
+  "out": "TAPROOT SCAN\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ndir:        .\n\nruntimes:   2\n  node                 20.5.0 (pinned)\n  python               3.11.4 (pinned)\n\ncontainers: 2\n  cache                redis:7 \u2192 7\n  db                   postgres:15.3 \u2192 15.3\n\nenv-vars:   2\n  DATABASE_URL=postgres://localhost/app\n  NODE_ENV=development\n\nskipped 1 value(s) that look like secrets:\n  STRIPE_SECRET            line 3: key name marks it as a secret\n\napplied:    sha256:a3b7c737e463 \u2192 /root/prdemo/proj/.taproot/state.json",
+  "err": "",
+  "rc": 0,
+  "note": "detects the real environment and signs it"
+ },
+ {
+  "cmd": "mount --no-fuse",
+  "out": "TAPROOT MOUNT\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nrepo:       proj\nbase:       main@9d2ceaf\nstate:      signed \u00b7 sha256:a3b7c737e463\nruntimes:   2\n  - node: 20.5.0 (pinned=true)\n  - python: 3.11.4 (pinned=true)\ncontainers: 2\n  - cache: 7 (redis:7)\n  - db: 15.3 (postgres:15.3)\nenv-vars:   2\n\nmount:      (none \u2014 materializing a tree)\nhash:       a3b7c737e4630052d26fe5987b8335ac1f62cf476b8e920e18495c4faf40955c\n\n(no-fuse \u2014 wrote tree to /root/prdemo/proj/.taproot/mnt)\nenv:        /root/prdemo/proj/.taproot/mnt/env (writable \u2014 edit, then run `taproot sync --from-dir`)\nstatus:     \u25b6 INHERITED \u2014 ready to work",
+  "err": "",
+  "rc": 0,
+  "note": "materializes the tree, no FUSE needed"
+ },
+ {
+  "cmd": "sync --from-dir .taproot/mnt --dry-run",
+  "out": "captured drift from .taproot/mnt \u2192 .taproot/state.drift.json\nTAPROOT SYNC\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nbaseline:   sha256:a3b7c737e4630052d26fe5987b8335ac1f62cf476b8e920e18495c4faf40955c (/root/prdemo/proj/.taproot/state.json)\ndrift:      sha256:498b0fe05504554687057e6ee9e9fe8d643949a39ef4c7f5bd8ff428e9e044a5 (/root/prdemo/proj/.taproot/state.drift.json)\n\ndrift (1 field):\n  + env_vars.REDIS_URL\n      actual:   redis://localhost:6379\n      severity: Breaking\n\ndry-run \u2014 nothing adopted.\n[re-run without --dry-run to sign and adopt]",
+  "err": "",
+  "rc": 0,
+  "note": "drift is captured without a kernel mount"
+ },
+ {
+  "cmd": "sync --from-dir .taproot/mnt",
+  "out": "captured drift from .taproot/mnt \u2192 .taproot/state.drift.json\nTAPROOT SYNC\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nbaseline:   sha256:a3b7c737e4630052d26fe5987b8335ac1f62cf476b8e920e18495c4faf40955c (/root/prdemo/proj/.taproot/state.json)\ndrift:      sha256:1783901812724a9fc9ca001fef686484adb0c2e48e0b9cce7f4c8f421a5b4136 (/root/prdemo/proj/.taproot/state.drift.json)\n\ndrift (1 field):\n  + env_vars.REDIS_URL\n      actual:   redis://localhost:6379\n      severity: Breaking\n\nsigning with key mykey (V3/yzCGoSvV3SY45)\nadopted:    sha256:1783901812724a9fc9ca001fef686484adb0c2e48e0b9cce7f4c8f421a5b4136\npath:       /root/prdemo/proj/.taproot/state.json\n\nstatus:     \u25b6 INHERITED \u2014 ready to work",
+  "err": "",
+  "rc": 0,
+  "note": "review, sign, adopt"
+ },
+ {
+  "cmd": "registry log proj main",
+  "out": "TAPROOT REGISTRY LOG\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nrepo:       proj\nbranch:     main\nregistry:   /root/prdemo/proj/.taproot/registry\n\n* sha256:178390181272  main@9d2ceaf  signed\n\n1 entr(ies), newest first",
+  "err": "",
+  "rc": 0,
+  "note": "history now walks the branch"
+ }
+]

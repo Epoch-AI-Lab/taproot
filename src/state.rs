@@ -118,4 +118,8 @@ pub struct SignedState {
     /// base64 public key that signed it, if any
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
+    /// Registry history: the hash this state superseded, if any. Set by
+    /// `registry push` so a ref can be walked back to its first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }

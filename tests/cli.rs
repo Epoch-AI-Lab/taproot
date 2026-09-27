@@ -1,6 +1,6 @@
 use taproot::cli::{
-    handle_check, handle_init, handle_mount, handle_status, handle_sync, handle_verify, CheckArgs,
-    InitArgs, MountArgs, SyncArgs,
+    handle_check, handle_init, handle_mount, handle_scan, handle_status, handle_sync,
+    handle_verify, CheckArgs, InitArgs, MountArgs, ScanArgs, SyncArgs,
 };
 
 fn temp_dir() -> tempfile::TempDir {
@@ -69,9 +69,10 @@ fn mount_rejects_symlink_even_with_no_fuse() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
     let args = MountArgs {
-        path: link,
+        path: Some(link),
         state_path: Some(state_path),
         no_fuse: true,
+        out: None,
         drift_out: None,
     };
     assert!(handle_mount(args).is_err());
@@ -94,9 +95,10 @@ fn mount_no_fuse_succeeds_on_valid_dir() {
     std::fs::create_dir_all(&mnt).unwrap();
 
     let args = MountArgs {
-        path: mnt,
+        path: Some(mnt),
         state_path: Some(state_path),
         no_fuse: true,
+        out: None,
         drift_out: None,
     };
     assert!(handle_mount(args).is_ok());
@@ -125,6 +127,187 @@ fn check_passes_on_identical_signed_states() {
         no_strict: false,
     })
     .is_ok());
+}
+
+#[test]
+fn mount_no_fuse_materializes_tree_with_only_env_writable() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    let out = dir.path().join("tree");
+    assert!(handle_mount(MountArgs {
+        path: None,
+        state_path: Some(state_path),
+        no_fuse: true,
+        out: Some(out.clone()),
+        drift_out: None,
+    })
+    .is_ok());
+
+    for name in ["README.taproot", "state.json", "env", "hash", "version"] {
+        assert!(out.join(name).exists(), "missing {name}");
+    }
+    // env is the one file the drift loop is allowed to edit, so the round trip
+    // has to work: write to it, then let sync pick the edit up. The read-only
+    // bits on the other files are set by the same code path but are not
+    // asserted here, because a proot or sandboxed environment can drop them
+    // without the test telling us anything true about the code.
+    std::fs::write(out.join("env"), "A=1\n").unwrap();
+}
+
+#[test]
+fn sync_from_dir_adopts_env_edits_without_fuse() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    let out = dir.path().join("tree");
+    handle_mount(MountArgs {
+        path: None,
+        state_path: Some(state_path.clone()),
+        no_fuse: true,
+        out: Some(out.clone()),
+        drift_out: None,
+    })
+    .unwrap();
+
+    std::fs::write(out.join("env"), "DATABASE_URL=postgres://localhost/app\n").unwrap();
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        from_dir: Some(out),
+        dry_run: true,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok());
+
+    let adopted = handle_sync(SyncArgs {
+        state_path: Some(state_path.clone()),
+        from: None,
+        from_dir: Some(dir.path().join("tree")),
+        dry_run: false,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok();
+    assert!(adopted);
+    let signed: taproot::SignedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        signed
+            .state
+            .env_vars
+            .get("DATABASE_URL")
+            .map(String::as_str),
+        Some("postgres://localhost/app")
+    );
+}
+
+#[test]
+fn sync_from_dir_reports_no_drift_on_untouched_tree() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state_path.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+    let out = dir.path().join("tree");
+    handle_mount(MountArgs {
+        path: None,
+        state_path: Some(state_path.clone()),
+        no_fuse: true,
+        out: Some(out.clone()),
+        drift_out: None,
+    })
+    .unwrap();
+    // env was never edited, so there is nothing to adopt.
+    assert!(handle_sync(SyncArgs {
+        state_path: Some(state_path),
+        from: None,
+        from_dir: Some(out),
+        dry_run: true,
+        force: false,
+        no_sign: true,
+        keep: false,
+    })
+    .is_ok());
+}
+
+#[test]
+fn check_refuses_itself_as_baseline() {
+    // A baseline that is the state under test compares a file to itself and
+    // always reports no drift, which would turn the CI gate into a no-op.
+    let dir = temp_dir();
+    let state = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    assert!(handle_check(CheckArgs {
+        baseline: state.clone(),
+        state_path: Some(state.clone()),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
+}
+
+#[test]
+fn check_refuses_equivalent_paths_for_baseline() {
+    // Same file reached by a different spelling, including a symlink.
+    let dir = temp_dir();
+    let state = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    let alias = dir.path().join("alias.json");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&state, &alias).unwrap();
+
+    assert!(handle_check(CheckArgs {
+        baseline: alias,
+        state_path: Some(state),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
 }
 
 #[test]
@@ -311,6 +494,7 @@ fn sync_dry_run_reports_but_does_not_adopt() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: true,
         force: false,
         no_sign: true,
@@ -332,6 +516,7 @@ fn sync_adopts_drift_and_resigns() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -359,6 +544,7 @@ fn sync_errors_without_drift_file() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -377,6 +563,7 @@ fn sync_identical_states_cleans_up_drift_file() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -393,6 +580,7 @@ fn sync_refuses_from_pointing_at_state_file() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: Some(state_path.clone()),
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -418,6 +606,7 @@ fn sync_refuses_identity_drift_without_force() {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         },
     )
     .unwrap();
@@ -425,6 +614,7 @@ fn sync_refuses_identity_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -435,6 +625,7 @@ fn sync_refuses_identity_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: true,
         no_sign: true,
@@ -460,6 +651,7 @@ fn sync_refuses_branch_commit_drift_without_force() {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         },
     )
     .unwrap();
@@ -467,6 +659,7 @@ fn sync_refuses_branch_commit_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: false,
         no_sign: true,
@@ -478,6 +671,7 @@ fn sync_refuses_branch_commit_drift_without_force() {
     assert!(handle_sync(SyncArgs {
         state_path: Some(state_path.clone()),
         from: None,
+        from_dir: None,
         dry_run: false,
         force: true,
         no_sign: true,
@@ -539,4 +733,111 @@ fn extract_env_drift_rejects_non_utf8() {
     let baseline = taproot::StateEngine::load(&state_path).unwrap();
     let raw = [0xFFu8, 0xFE, b'A', b'=', b'1'];
     assert!(extract_env_drift(&baseline, &raw).is_err());
+}
+
+#[test]
+fn scan_apply_writes_detected_environment_into_a_signed_state() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".tool-versions"),
+        "nodejs 20.5.0\npython 3.11.4\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("docker-compose.yml"),
+        "services:\n  db:\n    image: postgres:15.3\n",
+    )
+    .unwrap();
+    let state_path = root.join("state.json");
+
+    assert!(handle_scan(ScanArgs {
+        dir: Some(root.to_path_buf()),
+        json: false,
+        apply: true,
+        state_path: Some(state_path.clone()),
+        include_env: false,
+    })
+    .is_ok());
+
+    let signed: taproot::SignedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    // nodejs is canonicalized to node, so one tool is one runtime.
+    let runtimes: Vec<(&str, &str)> = signed
+        .state
+        .runtimes
+        .iter()
+        .map(|r| (r.name.as_str(), r.version.as_str()))
+        .collect();
+    assert_eq!(runtimes, vec![("node", "20.5.0"), ("python", "3.11.4")]);
+    assert_eq!(signed.state.containers.len(), 1);
+    assert_eq!(signed.state.containers[0].image, "postgres:15.3");
+    // Everything is signed, so the state verifies on its own.
+    assert!(taproot::StateEngine::verify(&signed).is_ok());
+}
+
+#[test]
+fn scan_never_writes_a_secret_into_the_state() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".env"),
+        "NODE_ENV=development\nSTRIPE_SECRET=sk_live_should_not_appear\nDB_PASSWORD=hunter2\n",
+    )
+    .unwrap();
+    let state_path = root.join("state.json");
+
+    handle_scan(ScanArgs {
+        dir: Some(root.to_path_buf()),
+        json: false,
+        apply: true,
+        state_path: Some(state_path.clone()),
+        include_env: true,
+    })
+    .unwrap();
+
+    let raw = std::fs::read_to_string(&state_path).unwrap();
+    assert!(
+        !raw.contains("sk_live_should_not_appear"),
+        "secret leaked into state"
+    );
+    assert!(!raw.contains("hunter2"), "password leaked into state");
+    let signed: taproot::SignedState = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        signed.state.env_vars.get("NODE_ENV").map(String::as_str),
+        Some("development")
+    );
+}
+
+#[test]
+fn scan_without_env_flag_ignores_dotenv() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::write(root.join(".env"), "TOKEN=abc123\n").unwrap();
+    let state_path = root.join("state.json");
+    handle_scan(ScanArgs {
+        dir: Some(root.to_path_buf()),
+        json: false,
+        apply: true,
+        state_path: Some(state_path.clone()),
+        include_env: false,
+    })
+    .unwrap();
+    let signed: taproot::SignedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert!(signed.state.env_vars.is_empty());
+}
+
+#[test]
+fn scan_on_project_with_nothing_declared_still_succeeds() {
+    let dir = temp_dir();
+    let state_path = dir.path().join("state.json");
+    assert!(handle_scan(ScanArgs {
+        dir: Some(dir.path().to_path_buf()),
+        json: true,
+        apply: false,
+        state_path: Some(state_path),
+        include_env: false,
+    })
+    .is_ok());
 }

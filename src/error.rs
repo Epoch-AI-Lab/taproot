@@ -20,6 +20,9 @@ pub enum TaprootError {
     #[error("mount failed: {0}")]
     Mount(String),
 
+    #[error("invalid paths: {0}")]
+    InvalidPaths(String),
+
     #[error("baseline not found: {0}")]
     BaselineMissing(String),
 
