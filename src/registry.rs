@@ -19,6 +19,10 @@ pub struct Registry {
     root: PathBuf,
 }
 
+/// Upper bound on `log` chain walks, so a corrupted or cyclic parent link
+/// cannot spin forever. Far above any real branch history.
+const MAX_LOG_HOPS: usize = 10_000;
+
 impl Registry {
     /// Create a registry handle without touching the filesystem.
     pub fn new(root: &Path) -> Self {
@@ -66,6 +70,11 @@ impl Registry {
     }
 
     /// Push a signed state: verify, persist object, update ref.
+    ///
+    /// The ref's current hash is recorded as the new object's `parent`, so
+    /// `log` can walk a branch back to its first push. A re-push of the same
+    /// hash is a no-op for history, so pushing twice does not fork the chain.
+    ///
     /// Returns the hash on success.
     pub fn push(&self, signed: &SignedState) -> Result<String, TaprootError> {
         // Validate + verify before any IO.
@@ -85,34 +94,44 @@ impl Registry {
         fs::create_dir_all(self.objects_dir())?;
         fs::create_dir_all(self.refs_dir())?;
 
+        // Link to whatever this ref pointed at before, but not to itself: a
+        // re-push of the same object must not make the chain cyclic.
+        let ref_path = self.ref_path(&signed.state.base.repo, &signed.state.base.branch)?;
+        let previous = self.resolve_ref(&signed.state.base.repo, &signed.state.base.branch)?;
+        let parent = previous.filter(|p| p != &signed.hash);
+
+        let mut stored = signed.clone();
+        if parent.is_some() {
+            stored.parent = parent;
+        }
+
         // Write object atomically if not already present.
-        let obj_path = self.object_path(&signed.hash);
+        let obj_path = self.object_path(&stored.hash);
         if !obj_path.exists() {
-            let bytes = serde_json::to_vec_pretty(signed)?;
+            let bytes = serde_json::to_vec_pretty(&stored)?;
             atomic_write(&obj_path, &bytes)?;
-            tracing::info!(hash=%signed.hash, ?obj_path, "registry object written");
+            tracing::info!(hash=%stored.hash, ?obj_path, "registry object written");
         } else {
             // Verify existing object matches (defensive).
-            let existing = self.pull(&signed.hash)?;
-            if existing != *signed {
-                tracing::warn!(hash=%signed.hash, "registry object exists with different content");
+            let existing = self.pull(&stored.hash)?;
+            if existing.state != stored.state {
+                tracing::warn!(hash=%stored.hash, "registry object exists with different content");
             }
         }
 
         // Update ref atomically.
-        let ref_path = self.ref_path(&signed.state.base.repo, &signed.state.base.branch)?;
         if let Some(parent) = ref_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        atomic_write(&ref_path, signed.hash.as_bytes())?;
+        atomic_write(&ref_path, stored.hash.as_bytes())?;
         tracing::info!(
-            repo=%signed.state.base.repo,
-            branch=%signed.state.base.branch,
-            hash=%signed.hash,
+            repo=%stored.state.base.repo,
+            branch=%stored.state.base.branch,
+            hash=%stored.hash,
             "registry ref updated"
         );
 
-        Ok(signed.hash.clone())
+        Ok(stored.hash.clone())
     }
 
     /// Pull an object by hash. Verifies signature and hash.
@@ -193,16 +212,37 @@ impl Registry {
         Ok(out)
     }
 
-    /// Log for a repo/branch. Currently returns the single SignedState
-    /// pointed to by the ref, if any (no history chain yet).
+    /// Log for a repo/branch. Returns every state ever pushed to that ref,
+    /// newest first, following the parent chain recorded at push time.
     pub fn log(&self, repo: &str, branch: &str) -> Result<Vec<SignedState>, TaprootError> {
-        match self.resolve_ref(repo, branch)? {
-            Some(hash) => {
-                let signed = self.pull(&hash)?;
-                Ok(vec![signed])
+        let Some(head) = self.resolve_ref(repo, branch)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut cursor = Some(head);
+        // Bounded so a corrupted or cyclic parent chain cannot spin forever.
+        let mut hops = 0usize;
+        while let Some(hash) = cursor {
+            if hops > MAX_LOG_HOPS {
+                tracing::warn!(repo, branch, "log chain longer than limit, truncating");
+                break;
             }
-            None => Ok(Vec::new()),
+            hops += 1;
+            let signed = self.pull(&hash)?;
+            cursor = signed.parent.clone();
+            out.push(signed);
         }
+        Ok(out)
+    }
+
+    /// Parent hashes recorded for a ref, newest first. `None` when the ref has
+    /// never been pushed to.
+    pub fn history(&self, repo: &str, branch: &str) -> Result<Vec<String>, TaprootError> {
+        Ok(self
+            .log(repo, branch)?
+            .into_iter()
+            .map(|s| s.hash)
+            .collect())
     }
 }
 
@@ -255,6 +295,13 @@ mod tests {
         let state = sample_state(repo, branch, "abc123");
         let (priv_key, _) = StateEngine::generate_keypair();
         StateEngine::sign(&state, &priv_key).unwrap()
+    }
+
+    /// Sign a state with a throwaway key, for tests that need several
+    /// distinct objects in one registry.
+    fn sign(state: &TaprootState) -> SignedState {
+        let (priv_key, _) = StateEngine::generate_keypair();
+        StateEngine::sign(state, &priv_key).unwrap()
     }
 
     #[test]
@@ -384,6 +431,67 @@ mod tests {
     }
 
     #[test]
+    fn log_walks_parent_chain_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::init(&dir.path().join("reg")).unwrap();
+        let first = signed_sample("myapp", "main");
+        reg.push(&first).unwrap();
+
+        let mut second = sample_state("myapp", "main", "def456");
+        second.env_vars.insert("SECOND".into(), "1".into());
+        let second = sign(&second);
+        reg.push(&second).unwrap();
+
+        let mut third = sample_state("myapp", "main", "aaa111");
+        third.env_vars.insert("THIRD".into(), "1".into());
+        let third = sign(&third);
+        reg.push(&third).unwrap();
+
+        let log = reg.log("myapp", "main").unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0].hash, third.hash, "newest first");
+        assert_eq!(log[1].hash, second.hash);
+        assert_eq!(log[2].hash, first.hash);
+        // The oldest entry has no parent.
+        assert_eq!(log[2].parent, None);
+        assert_eq!(log[0].parent.as_deref(), Some(second.hash.as_str()));
+    }
+
+    #[test]
+    fn repush_same_hash_does_not_extend_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::init(&dir.path().join("reg")).unwrap();
+        let signed = signed_sample("myapp", "main");
+        reg.push(&signed).unwrap();
+        reg.push(&signed).unwrap();
+        reg.push(&signed).unwrap();
+        // Self-parenting would make the walk loop forever.
+        assert_eq!(reg.log("myapp", "main").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn history_is_hashes_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::init(&dir.path().join("reg")).unwrap();
+        let first = signed_sample("myapp", "main");
+        reg.push(&first).unwrap();
+        let second = sign(&sample_state("myapp", "main", "zzz999"));
+        reg.push(&second).unwrap();
+        assert_eq!(
+            reg.history("myapp", "main").unwrap(),
+            vec![second.hash, first.hash]
+        );
+    }
+
+    #[test]
+    fn log_on_unknown_branch_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::init(&dir.path().join("reg")).unwrap();
+        reg.push(&signed_sample("myapp", "main")).unwrap();
+        assert!(reg.log("myapp", "never-pushed").unwrap().is_empty());
+    }
+
+    #[test]
     fn push_verifies_hash_and_signature() {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::init(&dir.path().join("reg")).unwrap();
@@ -476,6 +584,7 @@ mod tests {
             hash: hash.clone(),
             signature: None,
             public_key: None,
+            parent: None,
         };
         let h = reg.push(&signed).unwrap();
         assert_eq!(h, hash);

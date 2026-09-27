@@ -760,6 +760,7 @@ pub fn extract_env_drift(
         hash,
         signature: None,
         public_key: None,
+        parent: None,
     })
 }
 
@@ -862,6 +863,7 @@ mod tests {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         }
     }
 

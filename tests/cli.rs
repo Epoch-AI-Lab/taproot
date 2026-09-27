@@ -1,6 +1,6 @@
 use taproot::cli::{
-    handle_check, handle_init, handle_mount, handle_scan, handle_status, handle_sync, handle_verify,
-    CheckArgs, InitArgs, MountArgs, ScanArgs, SyncArgs,
+    handle_check, handle_init, handle_mount, handle_scan, handle_status, handle_sync,
+    handle_verify, CheckArgs, InitArgs, MountArgs, ScanArgs, SyncArgs,
 };
 
 fn temp_dir() -> tempfile::TempDir {
@@ -606,6 +606,7 @@ fn sync_refuses_identity_drift_without_force() {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         },
     )
     .unwrap();
@@ -650,6 +651,7 @@ fn sync_refuses_branch_commit_drift_without_force() {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         },
     )
     .unwrap();
@@ -737,7 +739,11 @@ fn extract_env_drift_rejects_non_utf8() {
 fn scan_apply_writes_detected_environment_into_a_signed_state() {
     let dir = temp_dir();
     let root = dir.path();
-    std::fs::write(root.join(".tool-versions"), "nodejs 20.5.0\npython 3.11.4\n").unwrap();
+    std::fs::write(
+        root.join(".tool-versions"),
+        "nodejs 20.5.0\npython 3.11.4\n",
+    )
+    .unwrap();
     std::fs::write(
         root.join("docker-compose.yml"),
         "services:\n  db:\n    image: postgres:15.3\n",
@@ -791,7 +797,10 @@ fn scan_never_writes_a_secret_into_the_state() {
     .unwrap();
 
     let raw = std::fs::read_to_string(&state_path).unwrap();
-    assert!(!raw.contains("sk_live_should_not_appear"), "secret leaked into state");
+    assert!(
+        !raw.contains("sk_live_should_not_appear"),
+        "secret leaked into state"
+    );
     assert!(!raw.contains("hunter2"), "password leaked into state");
     let signed: taproot::SignedState = serde_json::from_str(&raw).unwrap();
     assert_eq!(

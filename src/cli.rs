@@ -740,6 +740,7 @@ pub fn handle_init(args: InitArgs) -> Result<(), TaprootError> {
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         }
     } else {
         // Prefer stored keys if available, else generate ephemeral
@@ -855,6 +856,7 @@ pub fn sign_state_with_keys(
             hash,
             signature: None,
             public_key: None,
+            parent: None,
         });
     }
     if keys_path.exists() {
@@ -2064,7 +2066,7 @@ pub fn handle_registry_log(args: RegistryLogArgs) -> Result<(), TaprootError> {
     if entries.is_empty() {
         println!("(no entries for {}/{})", args.repo, args.branch);
     } else {
-        for signed in &entries {
+        for (i, signed) in entries.iter().enumerate() {
             let short = if signed.hash.len() >= 12 {
                 &signed.hash[..12]
             } else {
@@ -2075,16 +2077,18 @@ pub fn handle_registry_log(args: RegistryLogArgs) -> Result<(), TaprootError> {
             } else {
                 "unsigned"
             };
+            // First entry is the current ref head; the rest are ancestors.
+            let marker = if i == 0 { "*" } else { " " };
             println!(
-                "* {}  {}@{}  {sig_label} · sha256:{short}",
-                signed.hash, signed.state.base.branch, signed.state.base.commit
+                "{marker} sha256:{short}  {}@{}  {sig_label}",
+                signed.state.base.branch, signed.state.base.commit
             );
             if let Some(notes) = &signed.state.notes {
-                println!("  notes: {notes}");
+                println!("    notes: {notes}");
             }
         }
         println!();
-        println!("{} entr(ies)", entries.len());
+        println!("{} entr(ies), newest first", entries.len());
     }
     Ok(())
 }
