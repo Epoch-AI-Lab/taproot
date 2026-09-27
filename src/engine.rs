@@ -69,7 +69,6 @@ impl StateEngine {
             hash: hash_hex,
             signature: Some(B64.encode(signature.to_bytes())),
             public_key: Some(public_key_b64),
-            parent: None,
         })
     }
 

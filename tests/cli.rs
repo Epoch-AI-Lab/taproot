@@ -128,6 +128,61 @@ fn check_passes_on_identical_signed_states() {
 }
 
 #[test]
+fn check_refuses_itself_as_baseline() {
+    // A baseline that is the state under test compares a file to itself and
+    // always reports no drift, which would turn the CI gate into a no-op.
+    let dir = temp_dir();
+    let state = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    assert!(handle_check(CheckArgs {
+        baseline: state.clone(),
+        state_path: Some(state.clone()),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
+}
+
+#[test]
+fn check_refuses_equivalent_paths_for_baseline() {
+    // Same file reached by a different spelling, including a symlink.
+    let dir = temp_dir();
+    let state = dir.path().join("state.json");
+    handle_init(InitArgs {
+        repo: "myapp".into(),
+        branch: "main".into(),
+        commit: "abc123".into(),
+        state_path: Some(state.clone()),
+        no_sign: true,
+    })
+    .unwrap();
+
+    let alias = dir.path().join("alias.json");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&state, &alias).unwrap();
+
+    assert!(handle_check(CheckArgs {
+        baseline: alias,
+        state_path: Some(state),
+        json: false,
+        strict: true,
+        allow_warnings: false,
+        no_strict: false,
+    })
+    .is_err());
+}
+
+#[test]
 fn check_fails_on_commit_drift_strict() {
     let dir = temp_dir();
     let baseline = dir.path().join("baseline.json");

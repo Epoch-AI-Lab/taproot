@@ -632,7 +632,7 @@ fn ensure_distinct(a: &Path, b: &Path, what: &str) -> Result<(), TaprootError> {
         })
     };
     if resolve(a) == resolve(b) {
-        return Err(TaprootError::Mount(format!(
+        return Err(TaprootError::InvalidPaths(format!(
             "{what} points at the baseline state file itself ({}): refusing",
             display_state_path(b)
         )));
@@ -1333,6 +1333,10 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
     let baseline_path = args.baseline;
 
     tracing::info!(?state_path, ?baseline_path, "check");
+
+    // A baseline that is the state under test compares a file to itself and
+    // always reports no drift, which turns the gate into a no-op. Refuse it.
+    ensure_distinct(&baseline_path, &state_path, "--baseline")?;
 
     // Load and verify both files — strict: unsigned is error
     let current = StateEngine::load(&state_path).map_err(|e| {
