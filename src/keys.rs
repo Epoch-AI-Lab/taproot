@@ -123,7 +123,6 @@ impl KeyStore {
 
     fn add_to_index(&self, kp: &Keypair) -> Result<(), TaprootError> {
         let mut keys = self.load_index()?;
-        // deactivate previous active keys if this one is active? keep all active for rotation
         keys.push(kp.clone());
         self.save_index(&keys)?;
         Ok(())

@@ -9,14 +9,10 @@ use crate::state::{SignedState, TaprootState};
 pub struct StateEngine;
 
 impl StateEngine {
-    /// Canonical JSON — sorted keys, no whitespace tricks.
-    /// Uses serde_json with BTreeMap already sorted, then re-serializes deterministically.
+    /// Canonical JSON — sorted keys, no whitespace tricks. The hash is taken over
+    /// this form, so key order must be stable across struct and map nesting.
     pub fn to_canonical_json(state: &TaprootState) -> Result<Vec<u8>, TaprootError> {
-        // serde_json sorts struct keys by definition order; BTreeMap sorts env_vars.
-        // For true canonical, we serialize via Value then to_string with sorted keys.
         let json = serde_json::to_string(state)?;
-        // Parse and re-stringify to ensure deterministic key ordering at all levels.
-        // serde_json's Value uses BTreeMap internally when `preserve_order` is off (default).
         let value: serde_json::Value = serde_json::from_str(&json)?;
         Ok(serde_json::to_vec(&value)?)
     }
