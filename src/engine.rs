@@ -112,28 +112,10 @@ impl StateEngine {
         }
     }
 
-    /// Save signed state to file (pretty JSON) — atomic via tempfile in same dir
+    /// Save signed state to file (pretty JSON), atomically.
     pub fn save(path: &std::path::Path, signed: &SignedState) -> Result<(), TaprootError> {
-        use std::io::Write;
         let bytes = serde_json::to_vec_pretty(signed)?;
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        if !parent.as_os_str().is_empty() && parent != std::path::Path::new(".") {
-            std::fs::create_dir_all(parent)?;
-        }
-        // Use tempfile with random suffix to avoid symlink races and collisions
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(&bytes)?;
-        tmp.flush()?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(path).map_err(|e| TaprootError::Io(e.error))?;
-        // fsync parent dir for durability
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
+        crate::util::atomic_write(path, &bytes)
     }
 
     /// Load signed state from file and verify
