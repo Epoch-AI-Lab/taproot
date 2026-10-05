@@ -562,6 +562,8 @@ fn print_status_line(ok: bool) {
 fn print_unsigned_warning() {
     println!("warning:    ⚠ UNSIGNED — hash ok, not cryptographically signed");
 }
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -1843,7 +1845,6 @@ pub fn handle_check(args: CheckArgs) -> Result<(), TaprootError> {
             warning: warnings,
         });
     }
-    // Validate has_breaking helper stays consistent
     debug_assert_eq!(has_breaking(&diffs), breaking > 0);
 
     Ok(())
