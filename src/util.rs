@@ -65,11 +65,6 @@ pub(crate) fn validate_non_empty(field: &str, value: &str) -> Result<(), Taproot
                 "{field} segment must not be '.' or '..'"
             )));
         }
-        if seg.is_empty() && value.contains('/') {
-            return Err(TaprootError::InvalidKey(format!(
-                "{field} contains empty segment"
-            )));
-        }
     }
     Ok(())
 }

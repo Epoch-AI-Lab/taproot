@@ -32,26 +32,34 @@ $ taproot scan .
   containers: 1
     db                    postgres:15.3 → 15.3
 
-$ taproot mount ~/projects/myapp
+$ taproot mount --no-fuse
 
   TAPROOT MOUNT
   ─────────────────────────────────────────
   repo:       myapp
   base:       main@9f3a2c1
-  state:      signed · sha256:b2c1...
-  materialized: 2.4 GB (lazy)
+  state:      signed · sha256:c9e22766863c
+  runtimes:   2
+    - node: 20.5.0 (pinned=true)
+    - python: 3.11.4 (pinned=true)
+  containers: 1
+    - db: 15.3 (postgres:15.3)
+  env-vars:   3
 
-  python:     3.11.4 (pinned)
-  node:       20.5.0 (pinned)
-  postgres:   15.3 (container, signed)
-  env-vars:   12 loaded from baseline
+  mount:      (none — materializing a tree)
+  hash:       c9e22766863c0424e6713f324c5dfcedcb82187e2f6786190dace3c4fd54e416
 
+  (no-fuse — wrote tree to /home/you/myapp/.taproot/mnt)
+  env:        /home/you/myapp/.taproot/mnt/env (writable — edit, then run `taproot sync --from-dir`)
   status:     ▶ INHERITED — ready to work
-
-  [s]ync · [f]ork · [d]etach
 ```
 
-If the state has drifted from the signed baseline, Taproot blocks execution and offers a sync.
+The mount writes a real directory, not a lazy 2.4 GB tree: `README.taproot`, `state.json`,
+`env`, `hash`, `version`, `runtimes/`, and `containers/`. Only `env` is writable.
+
+Drift is not detected at mount time. `taproot check` compares a state against a baseline,
+and `taproot sync` adopts edits captured from a materialized tree. There is no interactive
+`sync`/`fork`/`detach` prompt.
 
 ## Status
 
