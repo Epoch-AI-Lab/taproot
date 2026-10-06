@@ -232,12 +232,8 @@ pub async fn set_policy(
 pub struct CheckReq {
     pub baseline_hash: String,
     pub current_hash: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::state::default_true")]
     pub strict: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Serialize)]
