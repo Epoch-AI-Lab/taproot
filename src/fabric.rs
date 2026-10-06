@@ -231,7 +231,7 @@ mod tests {
         };
         fab.set_policy(&p).unwrap();
         let loaded = fab.get_policy("myapp").unwrap();
-        assert_eq!(loaded.require_check_strict, false);
+        assert!(!loaded.require_check_strict);
         assert_eq!(loaded.allowed_branches, vec!["main"]);
         let def = fab.get_policy("other").unwrap();
         assert!(def.require_signed);
