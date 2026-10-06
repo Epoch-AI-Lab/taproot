@@ -20,7 +20,7 @@ pub struct Runtime {
     pub pinned: bool,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 

@@ -24,18 +24,14 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     pub repo: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::state::default_true")]
     pub require_signed: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::state::default_true")]
     pub require_check_strict: bool,
     #[serde(default)]
     pub allowed_branches: Vec<String>, // empty = all
     #[serde(default)]
     pub blocked_env_keys: Vec<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for Policy {
