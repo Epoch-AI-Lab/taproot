@@ -26,11 +26,11 @@ $ taproot scan .
   dir:        .
 
   runtimes:   2
-    node                  20.5.0 (pinned)
-    python                3.11.4 (pinned)
+  node                 20.5.0 (pinned)
+  python               3.11.4 (pinned)
 
   containers: 1
-    db                    postgres:15.3 → 15.3
+  db                   postgres:15.3 → 15.3
 
 $ taproot mount --no-fuse
 
