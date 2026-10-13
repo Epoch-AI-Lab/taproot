@@ -8,7 +8,6 @@ FAIL_ON_DRIFT="${INPUT_FAIL_ON_DRIFT:-true}"
 WORKDIR="${INPUT_WORKING_DIRECTORY:-.}"
 REGISTRY_URL="${INPUT_REGISTRY_URL:-}"
 REGISTRY_TOKEN="${INPUT_REGISTRY_TOKEN:-}"
-REGISTRY_PATH="${INPUT_REGISTRY_PATH:-.taproot/registry}"
 
 # Validate baseline ref to prevent git argument injection
 if [[ "$BASELINE_REF" == -* ]] || [[ "$BASELINE_REF" == *$'\n'* ]]; then
@@ -36,12 +35,6 @@ escape_wf() {
   s="${s//%/%25}"
   s="${s//$'\r'/%0D}"
   s="${s//$'\n'/%0A}"
-  printf '%s' "$s"
-}
-escape_wf_colon() {
-  local s
-  s="$(escape_wf "$1")"
-  s="${s//:/%3A}"
   printf '%s' "$s"
 }
 
